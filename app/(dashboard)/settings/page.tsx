@@ -42,21 +42,37 @@ export default function SettingsPage() {
   useEffect(() => {
     async function loadSettings() {
       const supabase = createClient();
-      const { data } = await supabase.from("settings").select("*");
+      const { data, error } = await supabase.from("settings").select("*");
+
+      if (error) {
+        console.error("[settings] load error:", error);
+        toast.error("Failed to load settings");
+        setIsLoading(false);
+        return;
+      }
 
       if (data) {
+        // `value` is JSONB — Supabase already parses it to a JS value.
+        // Do NOT call JSON.parse.
         const settings = data.reduce(
-          (acc: Record<string, string>, row: { key: string; value: string }) => {
-            acc[row.key] = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+          (acc: Record<string, unknown>, row: { key: string; value: unknown }) => {
+            acc[row.key] = row.value;
             return acc;
           },
-          {} as Record<string, string>
+          {} as Record<string, unknown>
         );
 
-        if (settings.agency_name) setValue("agency_name", settings.agency_name);
-        if (settings.currency) setValue("currency", settings.currency);
-        if (settings.timezone) setValue("timezone", settings.timezone);
+        if (typeof settings.agency_name === "string") {
+          setValue("agency_name", settings.agency_name);
+        }
+        if (typeof settings.currency === "string") {
+          setValue("currency", settings.currency);
+        }
+        if (typeof settings.timezone === "string") {
+          setValue("timezone", settings.timezone);
+        }
       }
+
       setIsLoading(false);
     }
     loadSettings();
@@ -66,10 +82,11 @@ export default function SettingsPage() {
     setIsSaving(true);
 
     const supabase = createClient();
+    // `value` is JSONB → pass the JS value directly; Supabase serializes it.
     const updates = [
-      { key: "agency_name", value: JSON.stringify(data.agency_name) },
-      { key: "currency", value: JSON.stringify(data.currency || "INR") },
-      { key: "timezone", value: JSON.stringify(data.timezone || "Asia/Kolkata") },
+      { key: "agency_name", value: data.agency_name },
+      { key: "currency", value: data.currency || "INR" },
+      { key: "timezone", value: data.timezone || "Asia/Kolkata" },
     ];
 
     const { error } = await supabase
@@ -77,6 +94,7 @@ export default function SettingsPage() {
       .upsert(updates, { onConflict: "key" });
 
     if (error) {
+      console.error("[settings] save error:", error);
       toast.error("Failed to save settings");
     } else {
       toast.success("Settings saved");
