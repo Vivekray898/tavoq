@@ -31,20 +31,13 @@ export default function SignupPage() {
 
     const supabase = createClient();
 
-    // Check if any profiles exist (first user becomes admin)
-    const { count } = await supabase
-      .from("profiles")
-      .select("*", { count: "exact", head: true });
-
-    const isFirstUser = count === 0;
-
-    const { error } = await supabase.auth.signUp({
+    const { data: signUpData, error } = await supabase.auth.signUp({
       email: data.email,
       password: data.password,
       options: {
         data: {
           full_name: data.full_name,
-          role: isFirstUser ? "ADMIN" : "EMPLOYEE",
+          // role intentionally omitted — the DB trigger decides.
         },
       },
     });
@@ -55,13 +48,16 @@ export default function SignupPage() {
       return;
     }
 
-    if (isFirstUser) {
-      toast.success("Admin account created! Please sign in.");
+    if (!signUpData.session) {
+      toast.success("Account created! Check your email to confirm, then sign in.");
       router.push("/login");
-    } else {
-      toast.success("Account created! Please sign in.");
-      router.push("/login");
+      setIsLoading(false);
+      return;
     }
+
+    toast.success("Account created!");
+    router.push("/");
+    router.refresh();
   }
 
   return (
@@ -97,6 +93,7 @@ export default function SignupPage() {
                 placeholder="you@example.com"
                 autoComplete="email"
                 disabled={isLoading}
+                suppressHydrationWarning
                 {...register("email")}
               />
               <FieldError errors={errors.email ? [errors.email] : []} />
@@ -118,7 +115,11 @@ export default function SignupPage() {
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                   onClick={() => setShowPassword(!showPassword)}
                 >
-                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  {showPassword ? (
+                    <EyeOff className="size-4" />
+                  ) : (
+                    <Eye className="size-4" />
+                  )}
                 </button>
               </div>
               <FieldError errors={errors.password ? [errors.password] : []} />

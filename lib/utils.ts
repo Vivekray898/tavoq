@@ -1,19 +1,31 @@
-export { cn } from "cn";
+// /lib/utils.ts
+export { cn } from "cn"; // ⚠️ verify this module name is correct
 
 import { CURRENCY_SYMBOL } from "./constants";
 
 /**
  * Format a number as currency (INR).
+ * Handles null/undefined/NaN gracefully.
  */
-export function formatCurrency(amount: number): string {
-  return `${CURRENCY_SYMBOL}${amount.toLocaleString("en-IN")}`;
+export function formatCurrency(amount: number | null | undefined): string {
+  const value = Number(amount ?? 0);
+  if (!Number.isFinite(value)) return `${CURRENCY_SYMBOL}0`;
+  return `${CURRENCY_SYMBOL}${value.toLocaleString("en-IN", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 /**
  * Format a date string to a human-readable format.
+ * Handles date-only strings ("2026-09-24") as local dates.
  */
 export function formatDate(dateStr: string): string {
-  const date = new Date(dateStr);
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
+  const date = isDateOnly
+    ? new Date(`${dateStr}T00:00:00`)
+    : new Date(dateStr);
+
   return date.toLocaleDateString("en-IN", {
     day: "numeric",
     month: "short",
@@ -25,7 +37,11 @@ export function formatDate(dateStr: string): string {
  * Format a date string to include time.
  */
 export function formatDateTime(dateStr: string): string {
-  const date = new Date(dateStr);
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
+  const date = isDateOnly
+    ? new Date(`${dateStr}T00:00:00`)
+    : new Date(dateStr);
+
   return date.toLocaleDateString("en-IN", {
     day: "numeric",
     month: "short",
@@ -47,22 +63,23 @@ export function formatTime(dateStr: string): string {
 }
 
 /**
- * Get relative time string (e.g., "2 hours ago", "yesterday").
+ * Get relative time string. Handles both past and future dates.
  */
 export function getRelativeTime(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
-  const diffMins = Math.floor(diffSecs / 60);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
+  const diffMs = date.getTime() - now.getTime(); // future = positive
+  const absSecs = Math.abs(Math.floor(diffMs / 1000));
+  const absMins = Math.floor(absSecs / 60);
+  const absHours = Math.floor(absMins / 60);
+  const absDays = Math.floor(absHours / 24);
 
-  if (diffSecs < 60) return "Just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays === 1) return "Yesterday";
-  if (diffDays < 7) return `${diffDays}d ago`;
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+  if (absSecs < 60) return "Just now";
+  if (absMins < 60) return rtf.format(Math.round(diffMs / 60000), "minute");
+  if (absHours < 24) return rtf.format(Math.round(diffMs / 3600000), "hour");
+  if (absDays < 7) return rtf.format(Math.round(diffMs / 86400000), "day");
   return formatDate(dateStr);
 }
 
@@ -71,7 +88,9 @@ export function getRelativeTime(dateStr: string): string {
  */
 export function isOverdue(deadline: string | null): boolean {
   if (!deadline) return false;
-  return new Date(deadline) < new Date();
+  const d = new Date(deadline);
+  if (isNaN(d.getTime())) return false;
+  return d < new Date();
 }
 
 /**
@@ -80,6 +99,7 @@ export function isOverdue(deadline: string | null): boolean {
 export function isDueToday(deadline: string | null): boolean {
   if (!deadline) return false;
   const deadlineDate = new Date(deadline);
+  if (isNaN(deadlineDate.getTime())) return false;
   const today = new Date();
   return (
     deadlineDate.getFullYear() === today.getFullYear() &&
@@ -89,11 +109,12 @@ export function isDueToday(deadline: string | null): boolean {
 }
 
 /**
- * Check if a date is due within 24 hours.
+ * Check if a date is due within 24 hours (and not yet overdue).
  */
 export function isDueSoon(deadline: string | null): boolean {
   if (!deadline) return false;
   const deadlineDate = new Date(deadline);
+  if (isNaN(deadlineDate.getTime())) return false;
   const now = new Date();
   const diffMs = deadlineDate.getTime() - now.getTime();
   const diffHours = diffMs / (1000 * 60 * 60);
@@ -101,21 +122,29 @@ export function isDueSoon(deadline: string | null): boolean {
 }
 
 /**
- * Get initials from a name.
+ * Get initials from a name. Safe for null/empty input.
  */
-export function getInitials(name: string): string {
-  return name
-    .split(" ")
+export function getInitials(name: string | null | undefined): string {
+  if (!name) return "?";
+  const initials = name
+    .trim()
+    .split(/\s+/)
     .map((n) => n[0])
+    .filter(Boolean)
     .join("")
     .toUpperCase()
     .slice(0, 2);
+  return initials || "?";
 }
 
 /**
  * Truncate text with ellipsis.
  */
-export function truncate(text: string, maxLength: number): string {
+export function truncate(
+  text: string | null | undefined,
+  maxLength: number
+): string {
+  if (!text) return "";
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength) + "…";
 }

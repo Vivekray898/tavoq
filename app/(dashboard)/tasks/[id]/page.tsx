@@ -16,7 +16,7 @@ import {
   CheckCircle,
   RotateCcw,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -345,11 +345,14 @@ export default function TaskDetailPage() {
                   </Button>
 
                   <Dialog>
-                    <DialogTrigger>
-                      <Button variant="outline" className="w-full">
-                        <RotateCcw className="size-4 mr-2" />
-                        Request Revision
-                      </Button>
+                    <DialogTrigger
+                      className={cn(
+                        buttonVariants({ variant: "outline" }),
+                        "w-full"
+                      )}
+                    >
+                      <RotateCcw className="size-4 mr-2" />
+                      Request Revision
                     </DialogTrigger>
                     <DialogContent>
                       <DialogHeader>

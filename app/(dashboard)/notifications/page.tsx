@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Bell,
@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { SkeletonCard } from "@/components/shared/skeleton-loader";
+import { createClient } from "@/lib/supabase/client";
 import {
   getNotifications,
   markAsRead,
@@ -55,29 +56,88 @@ const typeLinks: Record<NotificationType, (refId: string | null) => string> = {
 export default function NotificationsPage() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
+  const [live, setLive] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const isFetchingRef = useRef(false);
 
-  useEffect(() => {
-    async function load() {
+  const refresh = useCallback(async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    try {
       const result = await getNotifications();
       if (result.success && result.data) {
         setNotifications(result.data);
       }
-      setLoading(false);
+    } finally {
+      isFetchingRef.current = false;
     }
-    load();
   }, []);
 
+  // Load current user + first page of notifications
+  useEffect(() => {
+    (async () => {
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (user) setUserId(user.id);
+
+      await refresh();
+      setLoading(false);
+    })();
+  }, [refresh]);
+
+  // Realtime subscription — only for this user's notifications
+  useEffect(() => {
+    if (!userId) return;
+    const supabase = createClient();
+
+    const channel = supabase
+      .channel(`notifications-page-${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "notifications",
+          filter: `user_id=eq.${userId}`,
+        },
+        () => {
+          refresh();
+        }
+      )
+      .subscribe((status) => {
+        setLive(status === "SUBSCRIBED");
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId, refresh]);
+
   async function handleMarkRead(id: string) {
-    await markAsRead(id);
+    // Optimistic update
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, read: true } : n))
     );
+    const result = await markAsRead(id);
+    if (!result.success) {
+      // Roll back on failure
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, read: false } : n))
+      );
+    }
   }
 
   async function handleMarkAllRead() {
-    await markAllAsRead();
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-    toast.success("All notifications marked as read");
+    const result = await markAllAsRead();
+    if (result.success) {
+      toast.success("All notifications marked as read");
+    } else {
+      toast.error(result.error ?? "Failed to mark all as read");
+      refresh();
+    }
   }
 
   const unreadCount = notifications.filter((n) => !n.read).length;
@@ -88,12 +148,23 @@ export default function NotificationsPage() {
         title="Notifications"
         description={`${unreadCount} unread notification${unreadCount !== 1 ? "s" : ""}`}
         actions={
-          unreadCount > 0 ? (
-            <Button variant="outline" size="sm" onClick={handleMarkAllRead}>
-              <CheckCheck className="size-4" />
-              Mark all read
-            </Button>
-          ) : undefined
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span
+                className={cn(
+                  "inline-block size-2 rounded-full",
+                  live ? "bg-green-500 animate-pulse" : "bg-gray-400"
+                )}
+              />
+              {live ? "Live" : "Connecting…"}
+            </div>
+            {unreadCount > 0 && (
+              <Button variant="outline" size="sm" onClick={handleMarkAllRead}>
+                <CheckCheck className="size-4" />
+                Mark all read
+              </Button>
+            )}
+          </div>
         }
       />
 
@@ -121,7 +192,8 @@ export default function NotificationsPage() {
                 <Card
                   className={cn(
                     "hover:shadow-sm transition-shadow cursor-pointer",
-                    !notification.read && "bg-blue-50/50 dark:bg-blue-900/10 border-blue-200 dark:border-blue-800"
+                    !notification.read &&
+                      "bg-blue-50/50 dark:bg-blue-900/10 border-blue-200 dark:border-blue-800"
                   )}
                   onClick={() => {
                     if (!notification.read) handleMarkRead(notification.id);
