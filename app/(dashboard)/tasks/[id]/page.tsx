@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Calendar,
@@ -45,6 +45,7 @@ import {
   uploadTaskAttachment,
   deleteTaskAttachment,
   getAttachmentUrl,
+  deleteTaskAction,
 } from "@/lib/actions/tasks";
 import { getLabels } from "@/lib/actions/task-extras";
 import {
@@ -70,6 +71,7 @@ const RESOURCE_ICONS: Record<ResourceType, typeof Globe> = {
 export default function TaskDetailPage() {
   const params = useParams();
   const taskId = params.id as string;
+  const router = useRouter();
 
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [labels, setLabels] = useState<Label[]>([]);
@@ -82,6 +84,8 @@ export default function TaskDetailPage() {
   const [revisionNote, setRevisionNote] = useState("");
   const [submitOpen, setSubmitOpen] = useState(false);
   const [deletingAttId, setDeletingAttId] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletingTask, setDeletingTask] = useState(false);
 
   const load = useCallback(async () => {
     const supabase = createClient();
@@ -216,6 +220,19 @@ export default function TaskDetailPage() {
     }
   }
 
+  async function handleDeleteTask() {
+    setDeletingTask(true);
+    const result = await deleteTaskAction(taskId);
+    setDeletingTask(false);
+    if (!result.success) {
+      toast.error(result.error ?? "Couldn't delete the task");
+      return;
+    }
+    toast.success("Task deleted");
+    router.replace("/tasks");
+    router.refresh();
+  }
+
   if (loading) return <SkeletonPage />;
 
   if (notFound || !task) {
@@ -276,12 +293,18 @@ export default function TaskDetailPage() {
             {task.title}
           </h1>
           {isAdmin && (
-            <Link
-              href={`/tasks/${task.id}/edit`}
-              className="hidden shrink-0 text-sm font-medium text-muted-foreground hover:text-foreground sm:block"
-            >
-              Edit
-            </Link>
+            <div className="flex shrink-0 items-center gap-2">
+              <Link
+                href={`/tasks/${task.id}/edit`}
+                className="hidden text-sm font-medium text-muted-foreground hover:text-foreground sm:block"
+              >
+                Edit
+              </Link>
+              <Button type="button" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" onClick={() => setDeleteOpen(true)}>
+                <Trash2 className="size-4" />
+                <span className="hidden sm:inline">Delete</span>
+              </Button>
+            </div>
           )}
         </div>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -301,6 +324,23 @@ export default function TaskDetailPage() {
           />
         </div>
       </div>
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {task.title}?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Comments, files, labels, subtasks, and related task activity will be removed. Tasks with payment records must be archived instead.
+          </p>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setDeleteOpen(false)}>Cancel</Button>
+            <Button type="button" variant="destructive" disabled={deletingTask} onClick={handleDeleteTask}>
+              {deletingTask ? "Deleting..." : "Delete task"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="grid gap-8 lg:grid-cols-[1fr_280px]">
         {/* Main column */}

@@ -2,7 +2,73 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { requireAdmin } from "@/lib/auth";
-import type { ActionResponse } from "@/types/database";
+import type { ActionResponse, Profile, UserRole } from "@/types/database";
+
+export interface TeamMember extends Profile {
+  active_tasks: number;
+  projects_count: number;
+}
+
+export async function getTeamMembers(): Promise<ActionResponse<TeamMember[]>> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+    const [{ data: profiles, error }, { data: tasks }, { data: memberships }] = await Promise.all([
+      supabase.from("profiles").select("*").order("created_at", { ascending: false }),
+      supabase.from("tasks").select("assigned_to, status").not("status", "eq", "COMPLETED"),
+      supabase.from("project_members").select("user_id"),
+    ]);
+
+    if (error) return { success: false, error: "Failed to load team" };
+
+    const activeTasks = new Map<string, number>();
+    for (const task of tasks ?? []) {
+      if (task.assigned_to) activeTasks.set(task.assigned_to, (activeTasks.get(task.assigned_to) ?? 0) + 1);
+    }
+    const projects = new Map<string, number>();
+    for (const membership of memberships ?? []) {
+      projects.set(membership.user_id, (projects.get(membership.user_id) ?? 0) + 1);
+    }
+
+    return {
+      success: true,
+      data: (profiles ?? []).map((profile) => ({
+        ...(profile as Profile),
+        active_tasks: activeTasks.get(profile.id) ?? 0,
+        projects_count: projects.get(profile.id) ?? 0,
+      })),
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+export async function manageProfileAction(
+  targetId: string,
+  action: "APPROVE" | "REJECT" | "SUSPEND" | "REACTIVATE" | "ROLE_CHANGED",
+  role?: UserRole
+): Promise<ActionResponse<Profile>> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .rpc("manage_profile_lifecycle", {
+        target_id: targetId,
+        requested_action: action,
+        requested_role: role ?? null,
+      })
+      .single();
+
+    if (error || !data) {
+      console.error("[manageProfileAction]", error);
+      return { success: false, error: error?.message ?? "Failed to update team member" };
+    }
+
+    return { success: true, data: data as Profile };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
 
 export interface EmployeeWithWorkload {
   id: string;

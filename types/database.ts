@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 
 export type UserRole = "ADMIN" | "EMPLOYEE";
+export type ProfileStatus = "PENDING" | "ACTIVE" | "SUSPENDED";
 
 export type ProjectStatus =
   | "PLANNING"
@@ -89,9 +90,12 @@ export interface Profile {
   full_name: string;
   email: string;
   avatar_url: string | null;
-  role: UserRole;
+  role: UserRole | null;
+  status: ProfileStatus;
   phone: string | null;
   active: boolean;
+  approved_at: string | null;
+  approved_by: string | null;
   notification_prefs?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;

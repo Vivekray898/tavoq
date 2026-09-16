@@ -144,7 +144,7 @@ export default function ProfilePage() {
           <h2 className="font-semibold">{profile.full_name}</h2>
           <p className="text-sm text-muted-foreground">{profile.email}</p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {ROLE_LABELS[profile.role]} · Joined {formatDate(profile.created_at)}
+            {profile.role ? ROLE_LABELS[profile.role] : "Pending"} · Joined {formatDate(profile.created_at)}
           </p>
         </div>
       </div>

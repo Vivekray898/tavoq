@@ -423,13 +423,49 @@ export async function updateTaskAction(
 
 export async function deleteTaskAction(id: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    const profile = await requireAdmin();
     const supabase = await createClient();
+
+    const [{ data: task }, { data: payment }, { data: attachments }] = await Promise.all([
+      supabase.from("tasks").select("id, title, project_id").eq("id", id).single(),
+      supabase.from("payments").select("id").eq("task_id", id).maybeSingle(),
+      supabase.from("task_attachments").select("file_path").eq("task_id", id),
+    ]);
+
+    if (!task) return { success: false, error: "Task not found" };
+    if (payment) {
+      return {
+        success: false,
+        error: "This task has a payment record. Archive it instead of deleting it.",
+      };
+    }
+
+    if (attachments && attachments.length > 0) {
+      const { error: storageError } = await supabase.storage
+        .from("attachments")
+        .remove(attachments.map((attachment) => attachment.file_path));
+      if (storageError) {
+        console.error("[deleteTaskAction] storage", storageError);
+        return { success: false, error: "Failed to remove task attachments" };
+      }
+    }
+
     const { error } = await supabase.from("tasks").delete().eq("id", id);
     if (error) {
       console.error("[deleteTaskAction]", error);
       return { success: false, error: "Failed to delete task" };
     }
+
+    const { error: auditError } = await supabase.from("admin_audit_log").insert({
+      actor_id: profile.id,
+      action: "TASK_DELETED",
+      detail: `${task.title} (${task.id})`,
+    });
+    if (auditError) {
+      console.error("[deleteTaskAction] audit", auditError);
+      return { success: false, error: "Task deleted, but audit logging failed" };
+    }
+
     return { success: true };
   } catch {
     return { success: false, error: "Unauthorized" };

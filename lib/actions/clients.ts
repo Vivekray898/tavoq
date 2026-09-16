@@ -184,7 +184,7 @@ export async function updateClientAction(
 /** Archive instead of delete (§56) — keeps history intact */
 export async function archiveClientAction(id: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    const profile = await requireAdmin();
     const supabase = await createClient();
     const { error } = await supabase
       .from("clients")
@@ -194,6 +194,12 @@ export async function archiveClientAction(id: string): Promise<ActionResponse> {
       console.error("[archiveClientAction]", error);
       return { success: false, error: "Failed to archive client" };
     }
+    const { error: auditError } = await supabase.from("admin_audit_log").insert({
+      actor_id: profile.id,
+      action: "CLIENT_ARCHIVED",
+      detail: id,
+    });
+    if (auditError) return { success: false, error: "Client archived, but audit logging failed" };
     return { success: true };
   } catch {
     return { success: false, error: "Unauthorized" };

@@ -49,7 +49,7 @@ export async function getUserId(): Promise<string | null> {
  */
 export async function isAdmin(): Promise<boolean> {
   const profile = await getUserProfile();
-  return profile?.role === "ADMIN";
+  return profile?.status === "ACTIVE" && profile.role === "ADMIN";
 }
 
 /**
@@ -57,20 +57,27 @@ export async function isAdmin(): Promise<boolean> {
  */
 export async function isEmployee(): Promise<boolean> {
   const profile = await getUserProfile();
-  return profile?.role === "EMPLOYEE";
+  return profile?.status === "ACTIVE" && profile.role === "EMPLOYEE";
 }
 
-/**
- * Require admin role. Throws if not admin.
- */
-export async function requireAdmin(): Promise<Profile> {
+/** Require a valid session, including pending and suspended profiles. */
+export async function requireAuthenticatedProfile(): Promise<Profile> {
   const profile = await getUserProfile();
 
   if (!profile) {
     throw new Error("Not authenticated");
   }
 
-  if (profile.role !== "ADMIN") {
+  return profile;
+}
+
+/**
+ * Require admin role. Throws if not admin.
+ */
+export async function requireAdmin(): Promise<Profile> {
+  const profile = await requireAuthenticatedProfile();
+
+  if (profile.status !== "ACTIVE" || profile.role !== "ADMIN") {
     throw new Error("Unauthorized: Admin access required");
   }
 
@@ -81,10 +88,10 @@ export async function requireAdmin(): Promise<Profile> {
  * Require any authenticated user.
  */
 export async function requireAuth(): Promise<Profile> {
-  const profile = await getUserProfile();
+  const profile = await requireAuthenticatedProfile();
 
-  if (!profile) {
-    throw new Error("Not authenticated");
+  if (profile.status !== "ACTIVE" || !profile.role) {
+    throw new Error("Account is not active");
   }
 
   return profile;
@@ -96,7 +103,7 @@ export async function requireAuth(): Promise<Profile> {
 export async function hasProjectAccess(
   projectId: string,
   userId: string,
-  userRole: UserRole
+  userRole: UserRole | null
 ): Promise<boolean> {
   if (userRole === "ADMIN") return true;
 
@@ -122,6 +129,7 @@ export async function getActiveEmployees(): Promise<Profile[]> {
     .from("profiles")
     .select("*")
     .eq("role", "EMPLOYEE")
+    .eq("status", "ACTIVE")
     .eq("active", true)
     .order("full_name");
 

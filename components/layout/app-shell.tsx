@@ -12,7 +12,7 @@ export function AppShell({
   profile,
   children,
 }: {
-  profile: Profile;
+  profile: Profile & { role: NonNullable<Profile["role"]> };
   children: React.ReactNode;
 }) {
   const [isOffline, setIsOffline] = useState(false);

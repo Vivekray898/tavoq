@@ -41,7 +41,7 @@ export const ADMIN_NAV: NavSection[] = [
   },
   {
     title: "Team",
-    items: [{ label: "Employees", href: "/employees", icon: Users }],
+    items: [{ label: "Team", href: "/employees", icon: Users }],
   },
   {
     title: "Finance",
@@ -92,7 +92,7 @@ export const EMPLOYEE_MOBILE_NAV: NavItem[] = [
 export const ADMIN_MORE_ITEMS: NavItem[] = [
   { label: "Search", href: "/search", icon: Search },
   { label: "Clients", href: "/clients", icon: Building2 },
-  { label: "Employees", href: "/employees", icon: Users },
+  { label: "Team", href: "/employees", icon: Users },
   { label: "Payments", href: "/payments", icon: IndianRupee },
   { label: "Notifications", href: "/notifications", icon: Bell, badge: "notifications" },
   { label: "Settings", href: "/settings", icon: Settings },

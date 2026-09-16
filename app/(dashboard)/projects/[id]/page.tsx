@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
+  Archive,
   ExternalLink,
   FileText,
   Globe,
@@ -40,6 +41,7 @@ import {
   getProject,
   addProjectResource,
   deleteProjectResource,
+  archiveProjectAction,
 } from "@/lib/actions/projects";
 import {
   formatDate,
@@ -62,6 +64,7 @@ type Tab = "overview" | "tasks" | "resources" | "activity";
 
 export default function ProjectDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const projectId = params.id as string;
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -76,6 +79,8 @@ export default function ProjectDetailPage() {
   const [resType, setResType] = useState<ResourceType>("DRIVE");
   const [resDesc, setResDesc] = useState("");
   const [addingRes, setAddingRes] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiving, setArchiving] = useState(false);
 
   const load = useCallback(async () => {
     const supabase = createClient();
@@ -161,6 +166,19 @@ export default function ProjectDetailPage() {
     }
   }
 
+  async function handleArchive() {
+    setArchiving(true);
+    const result = await archiveProjectAction(projectId);
+    setArchiving(false);
+    if (!result.success) {
+      toast.error(result.error ?? "Couldn't archive project");
+      return;
+    }
+    toast.success("Project archived");
+    router.push("/projects");
+    router.refresh();
+  }
+
   const counts = project.task_counts;
 
   return (
@@ -195,15 +213,40 @@ export default function ProjectDetailPage() {
             {project.status === "ACTIVE" ? "Active" : project.status.replaceAll("_", " ").toLowerCase()}
           </span>
           {isAdmin && (
-            <Link
-              href={`/projects/${project.id}/edit`}
-              className="ml-2 text-xs font-medium hover:text-foreground hover:underline"
-            >
-              Edit
-            </Link>
+            <div className="ml-2 flex items-center gap-2">
+              <Link
+                href={`/projects/${project.id}/edit`}
+                className="text-xs font-medium hover:text-foreground hover:underline"
+              >
+                Edit
+              </Link>
+              {project.status !== "ARCHIVED" && (
+                <Button type="button" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" onClick={() => setArchiveOpen(true)}>
+                  <Archive className="size-4" />
+                  <span className="hidden sm:inline">Archive</span>
+                </Button>
+              )}
+            </div>
           )}
         </div>
       </div>
+
+      <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Archive {project.name}?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            The project, its tasks, comments, resources, and activity will be kept. It will be hidden from active project views.
+          </p>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setArchiveOpen(false)}>Cancel</Button>
+            <Button type="button" variant="destructive" disabled={archiving} onClick={handleArchive}>
+              {archiving ? "Archiving..." : "Archive project"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Tabs (§21) */}
       <div className="mb-5 flex gap-1 overflow-x-auto border-b">

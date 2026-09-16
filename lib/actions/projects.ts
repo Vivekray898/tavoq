@@ -285,7 +285,7 @@ export async function updateProjectAction(
 /** Archive instead of delete (§56) */
 export async function archiveProjectAction(id: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    const profile = await requireAdmin();
     const supabase = await createClient();
     const { error } = await supabase
       .from("projects")
@@ -295,6 +295,12 @@ export async function archiveProjectAction(id: string): Promise<ActionResponse> 
       console.error("[archiveProjectAction]", error);
       return { success: false, error: "Failed to archive project" };
     }
+    const { error: auditError } = await supabase.from("admin_audit_log").insert({
+      actor_id: profile.id,
+      action: "PROJECT_ARCHIVED",
+      detail: id,
+    });
+    if (auditError) return { success: false, error: "Project archived, but audit logging failed" };
     return { success: true };
   } catch {
     return { success: false, error: "Unauthorized" };
