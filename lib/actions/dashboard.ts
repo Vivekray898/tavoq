@@ -4,39 +4,45 @@ import { createClient } from "@/lib/supabase/server";
 import { requireAuth } from "@/lib/auth";
 import type { ActionResponse } from "@/types/database";
 
-export interface AdminDashboardStats {
-  activeProjects: number;
-  activeTasks: number;
-  dueToday: number;
-  overdue: number;
-  needsReview: number;
-  pendingPayments: number;
-  paidThisMonth: number;
+// ──────────────────────────────────────────────
+// Admin dashboard (§9)
+// ──────────────────────────────────────────────
+
+export interface AdminDashboardData {
+  counts: {
+    due_today: number;
+    needs_review: number;
+    overdue: number;
+  };
+  needs_attention: Array<{
+    id: string;
+    kind: "SUBMITTED" | "OVERDUE";
+    title: string;
+    subtitle: string;
+    actor_name: string | null;
+    created_at: string | null;
+    deadline: string | null;
+  }>;
+  todays_work: Array<{
+    id: string;
+    title: string;
+    status: string;
+    deadline: string | null;
+    priority: string;
+    assigned_name: string | null;
+    project_name: string | null;
+  }>;
+  recent_activity: Array<{
+    id: string;
+    kind: "comment" | "submitted" | "completed" | "created" | "payment";
+    title: string;
+    detail: string | null;
+    created_at: string;
+  }>;
 }
 
-export interface UpcomingDeadline {
-  id: string;
-  title: string;
-  deadline: string;
-  project_id: string;
-  project_name: string;
-  assigned_to: string | null;
-  assigned_name: string | null;
-  priority: string;
-  status: string;
-}
-
-export interface RecentActivity {
-  id: string;
-  type: "comment" | "task_created" | "task_completed" | "payment";
-  title: string;
-  description: string;
-  created_at: string;
-  user_name: string | null;
-}
-
-export async function getAdminDashboardStats(): Promise<
-  ActionResponse<AdminDashboardStats>
+export async function getAdminDashboard(): Promise<
+  ActionResponse<AdminDashboardData>
 > {
   try {
     await requireAuth();
@@ -47,202 +53,411 @@ export async function getAdminDashboardStats(): Promise<
     startOfToday.setHours(0, 0, 0, 0);
     const endOfToday = new Date(now);
     endOfToday.setHours(23, 59, 59, 999);
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startIso = startOfToday.toISOString();
+    const endIso = endOfToday.toISOString();
 
-    const [
-      activeProjectsRes,
-      activeTasksRes,
-      dueTodayRes,
-      overdueRes,
-      needsReviewRes,
-      pendingPaymentsRes,
-      paidThisMonthRes,
-    ] = await Promise.all([
-      supabase
-        .from("projects")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "ACTIVE"),
+    const [dueTodayRes, reviewRes, overdueRes, submittedRes, todaysRes, activityRes] =
+      await Promise.all([
+        supabase
+          .from("tasks")
+          .select("*", { count: "exact", head: true })
+          .gte("deadline", startIso)
+          .lte("deadline", endIso)
+          .not("status", "in", '("COMPLETED")'),
+        supabase
+          .from("tasks")
+          .select("*", { count: "exact", head: true })
+          .eq("status", "SUBMITTED"),
+        supabase
+          .from("tasks")
+          .select("*", { count: "exact", head: true })
+          .lt("deadline", startIso)
+          .not("status", "in", '("COMPLETED")'),
+        // Needs attention: submitted tasks with submitter
+        supabase
+          .from("tasks")
+          .select(
+            "id, title, updated_at, assigned_user:profiles!tasks_assigned_to_fkey(full_name)"
+          )
+          .eq("status", "SUBMITTED")
+          .order("updated_at", { ascending: false })
+          .limit(6),
+        // Today's work: due today or overdue, active
+        supabase
+          .from("tasks")
+          .select(
+            "id, title, status, deadline, priority, assigned_user:profiles!tasks_assigned_to_fkey(full_name), project:projects(name)"
+          )
+          .not("status", "in", '("COMPLETED")')
+          .or(`deadline.lte.${endIso},deadline.gte.${startIso}`)
+          .order("deadline", { ascending: true, nullsFirst: false })
+          .limit(8),
+        // Recent activity: comments + recent task updates
+        supabase
+          .from("task_comments")
+          .select(
+            "id, comment, created_at, user:profiles(full_name), task:tasks(id, title)"
+          )
+          .order("created_at", { ascending: false })
+          .limit(6),
+      ]);
 
-      supabase
-        .from("tasks")
-        .select("*", { count: "exact", head: true })
-        .in("status", ["TODO", "IN_PROGRESS", "REVISION_REQUIRED"]),
-
-      supabase
-        .from("tasks")
-        .select("*", { count: "exact", head: true })
-        .gte("deadline", startOfToday.toISOString())
-        .lte("deadline", endOfToday.toISOString())
-        .not("status", "in", '("COMPLETED","APPROVED")'),
-
-      supabase
-        .from("tasks")
-        .select("*", { count: "exact", head: true })
-        .lt("deadline", startOfToday.toISOString())
-        .not("status", "in", '("COMPLETED","APPROVED")'),
-
-      supabase
-        .from("tasks")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "SUBMITTED"),
-
-      supabase
-        .from("tasks")
-        .select("payout_amount")
-        .eq("payment_status", "PENDING"),
-
-      supabase
-        .from("payments")
-        .select("amount")
-        .gte("paid_at", startOfMonth.toISOString()),
-    ]);
-
-    const pendingPayments = (pendingPaymentsRes.data ?? []).reduce(
-      (sum, t) => sum + Number(t.payout_amount ?? 0),
-      0
+    const needs_attention: AdminDashboardData["needs_attention"] = (
+      submittedRes.data ?? []
+    ).map(
+      (row: {
+        id: string;
+        title: string;
+        updated_at: string;
+        assigned_user: { full_name: string }[] | { full_name: string } | null;
+      }) => {
+        const u = Array.isArray(row.assigned_user)
+          ? row.assigned_user[0]
+          : row.assigned_user;
+        return {
+          id: row.id,
+          kind: "SUBMITTED" as const,
+          title: `${u?.full_name ?? "Someone"} submitted`,
+          subtitle: row.title,
+          actor_name: u?.full_name ?? null,
+          created_at: row.updated_at,
+          deadline: null,
+        };
+      }
     );
-    const paidThisMonth = (paidThisMonthRes.data ?? []).reduce(
-      (sum, p) => sum + Number(p.amount ?? 0),
-      0
+
+    // Overdue tasks also need attention
+    const { data: overdueTasks } = await supabase
+      .from("tasks")
+      .select("id, title, deadline, assigned_user:profiles!tasks_assigned_to_fkey(full_name)")
+      .lt("deadline", startIso)
+      .not("status", "in", '("COMPLETED")')
+      .order("deadline", { ascending: true })
+      .limit(4);
+
+    (overdueTasks ?? []).forEach(
+      (row: {
+        id: string;
+        title: string;
+        deadline: string;
+        assigned_user: { full_name: string }[] | { full_name: string } | null;
+      }) => {
+        const u = Array.isArray(row.assigned_user)
+          ? row.assigned_user[0]
+          : row.assigned_user;
+        needs_attention.push({
+          id: row.id,
+          kind: "OVERDUE",
+          title: `${u?.full_name ?? "Unassigned"}'s task is overdue`,
+          subtitle: row.title,
+          actor_name: u?.full_name ?? null,
+          created_at: null,
+          deadline: row.deadline,
+        });
+      }
+    );
+
+    const todays_work = (todaysRes.data ?? []).map(
+      (row: {
+        id: string;
+        title: string;
+        status: string;
+        deadline: string | null;
+        priority: string;
+        assigned_user: { full_name: string }[] | { full_name: string } | null;
+        project: { name: string }[] | { name: string } | null;
+      }) => {
+        const u = Array.isArray(row.assigned_user)
+          ? row.assigned_user[0]
+          : row.assigned_user;
+        const p = Array.isArray(row.project) ? row.project[0] : row.project;
+        return {
+          id: row.id,
+          title: row.title,
+          status: row.status,
+          deadline: row.deadline,
+          priority: row.priority,
+          assigned_name: u?.full_name ?? null,
+          project_name: p?.name ?? null,
+        };
+      }
+    );
+
+    const recent_activity = (activityRes.data ?? []).map(
+      (row: {
+        id: string;
+        comment: string;
+        created_at: string;
+        user: { full_name: string }[] | { full_name: string } | null;
+        task: { id: string; title: string }[] | { id: string; title: string } | null;
+      }) => {
+        const u = Array.isArray(row.user) ? row.user[0] : row.user;
+        const t = Array.isArray(row.task) ? row.task[0] : row.task;
+        return {
+          id: `comment-${row.id}`,
+          kind: "comment" as const,
+          title: `${u?.full_name ?? "Someone"} commented`,
+          detail: t ? `${t.title} — ${row.comment.slice(0, 60)}` : row.comment.slice(0, 60),
+          created_at: row.created_at,
+        };
+      }
     );
 
     return {
       success: true,
       data: {
-        activeProjects: activeProjectsRes.count ?? 0,
-        activeTasks: activeTasksRes.count ?? 0,
-        dueToday: dueTodayRes.count ?? 0,
-        overdue: overdueRes.count ?? 0,
-        needsReview: needsReviewRes.count ?? 0,
-        pendingPayments,
-        paidThisMonth,
+        counts: {
+          due_today: dueTodayRes.count ?? 0,
+          needs_review: reviewRes.count ?? 0,
+          overdue: overdueRes.count ?? 0,
+        },
+        needs_attention,
+        todays_work,
+        recent_activity,
       },
     };
-  } catch (err) {
-    console.error("[getAdminDashboardStats] error:", err);
-    return { success: false, error: "Failed to load dashboard stats" };
+  } catch {
+    return { success: false, error: "Failed to load dashboard" };
   }
 }
 
-export async function getUpcomingDeadlines(
-  limit = 5
-): Promise<ActionResponse<UpcomingDeadline[]>> {
+// ──────────────────────────────────────────────
+// Employee dashboard (§10)
+// ──────────────────────────────────────────────
+
+export interface EmployeeDashboardData {
+  due_today_count: number;
+  due_today: Array<{
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    deadline: string | null;
+    payout_amount: number;
+    payment_status: string;
+    project_name: string | null;
+  }>;
+  upcoming: Array<{
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    deadline: string | null;
+    payout_amount: number;
+    project_name: string | null;
+  }>;
+  waiting_review: Array<{
+    id: string;
+    title: string;
+    submitted_at: string | null;
+    project_name: string | null;
+  }>;
+  recently_completed: Array<{
+    id: string;
+    title: string;
+    completed_at: string | null;
+    payment_status: string;
+    payout_amount: number;
+  }>;
+}
+
+export async function getEmployeeDashboard(): Promise<
+  ActionResponse<EmployeeDashboardData>
+> {
   try {
-    await requireAuth();
+    const profile = await requireAuth();
     const supabase = await createClient();
 
-    const now = new Date().toISOString();
+    const now = new Date();
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date(now);
+    endOfToday.setHours(23, 59, 59, 999);
+    const startIso = startOfToday.toISOString();
+    const endIso = endOfToday.toISOString();
 
-    const { data, error } = await supabase
+    const { data: tasks, error } = await supabase
       .from("tasks")
       .select(
-        `
-        id, title, deadline, project_id, assigned_to, priority, status,
-        project:projects(name),
-        assigned_user:profiles(id, full_name)
-      `
+        "id, title, status, priority, deadline, payout_amount, payment_status, completed_at, updated_at, project:projects(name)"
       )
-      .gte("deadline", now)
-      .not("status", "in", '("COMPLETED","APPROVED")')
-      .order("deadline", { ascending: true })
-      .limit(limit);
+      .eq("assigned_to", profile.id)
+      .not("status", "in", '("COMPLETED")')
+      .order("deadline", { ascending: true, nullsFirst: false })
+      .limit(50);
 
     if (error) {
-      console.error("[getUpcomingDeadlines] error:", error);
-      return { success: false, error: "Failed to load deadlines" };
+      console.error("[getEmployeeDashboard]", error);
+      return { success: false, error: "Failed to load your tasks" };
     }
 
-    const deadlines: UpcomingDeadline[] = (data ?? []).map((row: any) => ({
-      id: row.id,
-      title: row.title,
-      deadline: row.deadline,
-      project_id: row.project_id,
-      project_name: row.project?.name ?? "—",
-      assigned_to: row.assigned_to,
-      assigned_name: row.assigned_user?.full_name ?? null,
-      priority: row.priority,
-      status: row.status,
-    }));
+    const { data: completedTasks } = await supabase
+      .from("tasks")
+      .select(
+        "id, title, completed_at, payment_status, payout_amount, project:projects(name)"
+      )
+      .eq("assigned_to", profile.id)
+      .eq("status", "COMPLETED")
+      .order("completed_at", { ascending: false })
+      .limit(5);
 
-    return { success: true, data: deadlines };
-  } catch (err) {
-    console.error("[getUpcomingDeadlines] error:", err);
-    return { success: false, error: "Failed to load deadlines" };
+    const mapProject = (row: { project: { name: string }[] | { name: string } | null }) => {
+      const p = Array.isArray(row.project) ? row.project[0] : row.project;
+      return p?.name ?? null;
+    };
+
+    const rows = (tasks ?? []).map((row) => row as never) as Array<
+      typeof tasks extends (infer T)[] | null ? T : never
+    >;
+
+    const due_today = rows
+      .filter(
+        (t) =>
+          t.deadline && t.deadline >= startIso && t.deadline <= endIso
+      )
+      .slice(0, 6)
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        priority: t.priority,
+        deadline: t.deadline,
+        payout_amount: Number(t.payout_amount),
+        payment_status: t.payment_status as string,
+        project_name: mapProject(t),
+      }));
+
+    const upcoming = rows
+      .filter((t) => !t.deadline || t.deadline > endIso)
+      .slice(0, 6)
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        priority: t.priority,
+        deadline: t.deadline,
+        payout_amount: Number(t.payout_amount),
+        project_name: mapProject(t),
+      }));
+
+    const waiting_review = rows
+      .filter((t) => t.status === "SUBMITTED")
+      .slice(0, 5)
+      .map((t) => ({
+        id: t.id,
+        title: t.title,
+        submitted_at: t.updated_at,
+        project_name: mapProject(t),
+      }));
+
+    const recently_completed = (completedTasks ?? []).map(
+      (row: {
+        id: string;
+        title: string;
+        completed_at: string | null;
+        payment_status: string;
+        payout_amount: number;
+      }) => ({
+        id: row.id,
+        title: row.title,
+        completed_at: row.completed_at,
+        payment_status: row.payment_status,
+        payout_amount: Number(row.payout_amount),
+      })
+    );
+
+    return {
+      success: true,
+      data: {
+        due_today_count: due_today.length,
+        due_today,
+        upcoming,
+        waiting_review,
+        recently_completed,
+      },
+    };
+  } catch {
+    return { success: false, error: "Failed to load dashboard" };
   }
 }
 
-export async function getRecentActivity(
-  limit = 8
-): Promise<ActionResponse<RecentActivity[]>> {
+// ──────────────────────────────────────────────
+// Global search (§52)
+// ──────────────────────────────────────────────
+
+export interface SearchResult {
+  tasks: Array<{ id: string; title: string; project_name: string | null }>;
+  projects: Array<{ id: string; name: string; client_name: string | null }>;
+  clients: Array<{ id: string; name: string }>;
+}
+
+export async function globalSearch(query: string): Promise<ActionResponse<SearchResult>> {
   try {
-    await requireAuth();
+    const profile = await requireAuth();
     const supabase = await createClient();
+    const q = query.trim();
+    if (q.length < 2) {
+      return { success: true, data: { tasks: [], projects: [], clients: [] } };
+    }
+    const like = `%${q}%`;
 
-    // Pull recent comments + recent task creations, merge, sort, slice
-    const [commentsRes, tasksRes] = await Promise.all([
-      supabase
-        .from("task_comments")
-        .select(
-          `
-          id, comment, created_at,
-          user:profiles(full_name),
-          task:tasks(title)
-        `
-        )
-        .order("created_at", { ascending: false })
-        .limit(limit),
+    let taskQuery = supabase
+      .from("tasks")
+      .select("id, title, project:projects(name)")
+      .ilike("title", like)
+      .limit(6);
 
-      supabase
-        .from("tasks")
-        .select(
-          `
-          id, title, created_at, status,
-          created_user:profiles!tasks_created_by_fkey(full_name)
-        `
-        )
-        .order("created_at", { ascending: false })
-        .limit(limit),
+    if (profile.role === "EMPLOYEE") {
+      taskQuery = taskQuery.eq("assigned_to", profile.id);
+    }
+
+    let projectQuery = supabase
+      .from("projects")
+      .select("id, name, client:clients(name)")
+      .ilike("name", like)
+      .neq("status", "ARCHIVED")
+      .limit(5);
+
+    if (profile.role === "EMPLOYEE") {
+      const { data: memberProjects } = await supabase
+        .from("project_members")
+        .select("project_id")
+        .eq("user_id", profile.id);
+      const ids = memberProjects?.map((m) => m.project_id) ?? [];
+      if (ids.length === 0) {
+        return { success: true, data: { tasks: [], projects: [], clients: [] } };
+      }
+      projectQuery = projectQuery.in("id", ids);
+    }
+
+    const [tasksRes, projectsRes, clientsRes] = await Promise.all([
+      taskQuery,
+      projectQuery,
+      profile.role === "ADMIN"
+        ? supabase.from("clients").select("id, name").ilike("name", like).limit(4)
+        : Promise.resolve({ data: [] as { id: string; name: string }[] }),
     ]);
 
-    const items: RecentActivity[] = [];
-
-    (commentsRes.data ?? []).forEach((c: any) => {
-      items.push({
-        id: `comment-${c.id}`,
-        type: "comment",
-        title: "New comment",
-        description: `On "${c.task?.title ?? "task"}": ${
-          (c.comment ?? "").slice(0, 80)
-        }${(c.comment ?? "").length > 80 ? "…" : ""}`,
-        created_at: c.created_at,
-        user_name: c.user?.full_name ?? null,
-      });
-    });
-
-    (tasksRes.data ?? []).forEach((t: any) => {
-      items.push({
-        id: `task-${t.id}`,
-        type: t.status === "COMPLETED" || t.status === "APPROVED"
-          ? "task_completed"
-          : "task_created",
-        title:
-          t.status === "COMPLETED" || t.status === "APPROVED"
-            ? "Task completed"
-            : "New task created",
-        description: t.title,
-        created_at: t.created_at,
-        user_name: t.created_user?.full_name ?? null,
-      });
-    });
-
-    items.sort(
-      (a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    );
-
-    return { success: true, data: items.slice(0, limit) };
-  } catch (err) {
-    console.error("[getRecentActivity] error:", err);
-    return { success: false, error: "Failed to load activity" };
+    return {
+      success: true,
+      data: {
+        tasks: (tasksRes.data ?? []).map(
+          (t: { id: string; title: string; project: { name: string }[] | { name: string } | null }) => {
+            const p = Array.isArray(t.project) ? t.project[0] : t.project;
+            return { id: t.id, title: t.title, project_name: p?.name ?? null };
+          }
+        ),
+        projects: (projectsRes.data ?? []).map(
+          (p: { id: string; name: string; client: { name: string }[] | null }) => ({
+            id: p.id,
+            name: p.name,
+            client_name: p.client?.[0]?.name ?? null,
+          })
+        ),
+        clients: (clientsRes as { data: { id: string; name: string }[] | null }).data ?? [],
+      },
+    };
+  } catch {
+    return { success: false, error: "Search failed" };
   }
 }

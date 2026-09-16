@@ -4,63 +4,95 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Plus, FolderKanban } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PageHeader } from "@/components/shared/page-header";
-import { ProjectCard } from "@/components/projects/project-card";
+import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { EmptyState } from "@/components/shared/empty-state";
-import { SkeletonCard } from "@/components/shared/skeleton-loader";
 import { getProjects } from "@/lib/actions/projects";
-import type { ProjectWithRelations } from "@/types/database";
+import { getMyRole } from "@/lib/actions/session";
+import { cn } from "@/lib/utils";
+
+interface ProjectRow {
+  id: string;
+  name: string;
+  client_name: string | null;
+  status: string;
+  active_tasks: number;
+}
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<ProjectWithRelations[]>([]);
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
-    async function load() {
-      const result = await getProjects();
-      if (result.success && result.data) {
-        setProjects(result.data);
+    (async () => {
+      const me = await getMyRole();
+      setIsAdmin(me.success && me.data?.role === "ADMIN");
+      const projectsRes = await getProjects();
+      if (projectsRes.success && projectsRes.data) {
+        setProjects(
+          projectsRes.data.map((p) => ({
+            id: p.id,
+            name: p.name,
+            client_name: p.client_name,
+            status: p.status,
+            active_tasks: p.active_tasks,
+          }))
+        );
       }
       setLoading(false);
-    }
-    load();
+    })();
   }, []);
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Projects"
-        description="Manage client projects"
-        actions={
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold tracking-tight lg:text-2xl">Projects</h1>
+        {isAdmin && (
           <Link href="/projects/new">
-            <Button>
-              <Plus className="size-4" />
-              New Project
+            <Button size="sm">
+              <Plus className="size-4" /> New project
             </Button>
           </Link>
-        }
-      />
+        )}
+      </div>
 
       {loading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <SkeletonCard key={i} />
-          ))}
-        </div>
+        <SkeletonList rows={5} />
       ) : projects.length === 0 ? (
         <EmptyState
           title="No projects yet"
-          description="Create your first project to start assigning work."
-          icon={<FolderKanban className="size-8 text-muted-foreground" />}
-          action={{
-            label: "New Project",
-            href: "/projects/new",
-          }}
+          description="Create your first client project and start assigning work."
+          icon={<FolderKanban />}
+          action={isAdmin ? { label: "New project", href: "/projects/new" } : undefined}
         />
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {projects.map((project) => (
-            <ProjectCard key={project.id} project={project} />
+        <div className="divide-y rounded-xl border bg-card">
+          {projects.map((p) => (
+            <Link
+              key={p.id}
+              href={`/projects/${p.id}`}
+              className="flex items-center gap-3 px-4 py-3.5 transition-colors hover:bg-accent/50"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{p.name}</p>
+                <p className="truncate text-[13px] text-muted-foreground">
+                  {p.client_name ?? "—"}
+                </p>
+              </div>
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                  p.status === "ACTIVE"
+                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                    : "bg-muted text-muted-foreground"
+                )}
+              >
+                {p.status === "ACTIVE" ? "Active" : p.status.replaceAll("_", " ").toLowerCase()}
+              </span>
+              <span className="w-16 shrink-0 text-right text-xs text-muted-foreground">
+                {p.active_tasks} active
+              </span>
+            </Link>
           ))}
         </div>
       )}

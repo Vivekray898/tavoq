@@ -1,21 +1,252 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAuth } from "@/lib/auth";
-import type { ActionResponse, Profile } from "@/types/database";
+import { requireAdmin } from "@/lib/auth";
+import type { ActionResponse } from "@/types/database";
 
-/**
- * Get all active employees (for dropdowns).
- */
-export async function getActiveEmployees(): Promise<ActionResponse<Profile[]>> {
+export interface EmployeeWithWorkload {
+  id: string;
+  full_name: string;
+  email: string;
+  avatar_url: string | null;
+  phone: string | null;
+  active: boolean;
+  active_tasks: number;
+  due_today: number;
+  pending_payout: number;
+}
+
+/** Admin: compact employee list with workload numbers (§24) */
+export async function getEmployeesWithWorkload(): Promise<
+  ActionResponse<EmployeeWithWorkload[]>
+> {
   try {
-    await requireAuth();
-
+    await requireAdmin();
     const supabase = await createClient();
 
+    const { data: employees, error } = await supabase
+      .from("profiles")
+      .select("id, full_name, email, avatar_url, phone, active")
+      .eq("role", "EMPLOYEE")
+      .order("full_name");
+
+    if (error) {
+      console.error("[getEmployeesWithWorkload]", error);
+      return { success: false, error: "Failed to load employees" };
+    }
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
+
+    const [{ data: tasks }, { data: payments }] = await Promise.all([
+      supabase
+        .from("tasks")
+        .select("assigned_to, deadline, status, payment_status, payout_amount")
+        .not("status", "in", '("COMPLETED")'),
+      supabase
+        .from("tasks")
+        .select("assigned_to, payment_status, payout_amount")
+        .eq("payment_status", "PENDING")
+        .gt("payout_amount", 0),
+    ]);
+
+    const stats = new Map<
+      string,
+      { active: number; dueToday: number; pending: number }
+    >();
+    (employees ?? []).forEach((e: { id: string }) =>
+      stats.set(e.id, { active: 0, dueToday: 0, pending: 0 })
+    );
+
+    (tasks ?? []).forEach(
+      (t: {
+        assigned_to: string | null;
+        deadline: string | null;
+        payment_status: string;
+        payout_amount: number;
+      }) => {
+        if (!t.assigned_to || !stats.has(t.assigned_to)) return;
+        const s = stats.get(t.assigned_to)!;
+        s.active += 1;
+        if (
+          t.deadline &&
+          t.deadline >= startOfToday.toISOString() &&
+          t.deadline <= endOfToday.toISOString()
+        ) {
+          s.dueToday += 1;
+        }
+      }
+    );
+
+    (payments ?? []).forEach(
+      (t: { assigned_to: string | null; payout_amount: number }) => {
+        if (!t.assigned_to || !stats.has(t.assigned_to)) return;
+        stats.get(t.assigned_to)!.pending += Number(t.payout_amount);
+      }
+    );
+
+    return {
+      success: true,
+      data: (employees ?? []).map(
+        (e: {
+          id: string;
+          full_name: string;
+          email: string;
+          avatar_url: string | null;
+          phone: string | null;
+          active: boolean;
+        }) => ({
+          ...e,
+          active_tasks: stats.get(e.id)?.active ?? 0,
+          due_today: stats.get(e.id)?.dueToday ?? 0,
+          pending_payout: stats.get(e.id)?.pending ?? 0,
+        })
+      ),
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+export interface EmployeeProfileDetail {
+  id: string;
+  full_name: string;
+  email: string;
+  avatar_url: string | null;
+  phone: string | null;
+  active: boolean;
+  created_at: string;
+  active_tasks: Array<{
+    id: string;
+    title: string;
+    status: string;
+    deadline: string | null;
+    project_name: string | null;
+  }>;
+  completed_count: number;
+  pending_payout: number;
+  recent_work: Array<{
+    id: string;
+    title: string;
+    status: string;
+    completed_at: string | null;
+  }>;
+}
+
+/** Admin: single employee profile with workload detail (§24) */
+export async function getEmployeeProfile(
+  id: string
+): Promise<ActionResponse<EmployeeProfileDetail>> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+
+    const { data: employee, error } = await supabase
+      .from("profiles")
+      .select("id, full_name, email, avatar_url, phone, active, created_at")
+      .eq("id", id)
+      .single();
+
+    if (error || !employee) {
+      return { success: false, error: "Employee not found" };
+    }
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const { data: tasks } = await supabase
+      .from("tasks")
+      .select(
+        "id, title, status, deadline, completed_at, project:projects(name), payment_status, payout_amount"
+      )
+      .eq("assigned_to", id)
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+    const all = tasks ?? [];
+    const active = all.filter(
+      (t: { status: string }) => t.status !== "COMPLETED"
+    );
+    const completed = all.filter(
+      (t: { status: string; completed_at: string | null }) =>
+        t.status === "COMPLETED"
+    );
+
+    const pending = all
+      .filter(
+        (t: { payment_status: string; payout_amount: number }) =>
+          t.payment_status === "PENDING" && Number(t.payout_amount) > 0
+      )
+      .reduce(
+        (sum: number, t: { payout_amount: number }) =>
+          sum + Number(t.payout_amount),
+        0
+      );
+
+    return {
+      success: true,
+      data: {
+        ...(employee as {
+          id: string;
+          full_name: string;
+          email: string;
+          avatar_url: string | null;
+          phone: string | null;
+          active: boolean;
+          created_at: string;
+        }),
+        active_tasks: active
+          .slice(0, 10)
+          .map(
+            (t: {
+              id: string;
+              title: string;
+              status: string;
+              deadline: string | null;
+              project: { name: string }[] | { name: string } | null;
+            }) => {
+              const p = Array.isArray(t.project)
+                ? t.project[0]
+                : t.project;
+              return {
+                id: t.id,
+                title: t.title,
+                status: t.status,
+                deadline: t.deadline,
+                project_name: p?.name ?? null,
+              };
+            }
+          ),
+        completed_count: completed.filter(
+          (t: { completed_at: string | null }) =>
+            t.completed_at && t.completed_at >= startOfMonth.toISOString()
+        ).length,
+        pending_payout: pending,
+        recent_work: completed.slice(0, 8).map((t: { id: string; title: string; status: string; completed_at: string | null }) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          completed_at: t.completed_at,
+        })),
+      },
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/** Any authenticated user: active employees for dropdowns */
+export async function getActiveEmployees(): Promise<
+  ActionResponse<Array<{ id: string; full_name: string; avatar_url: string | null }>>
+> {
+  try {
+    const supabase = await createClient();
     const { data, error } = await supabase
       .from("profiles")
-      .select("*")
+      .select("id, full_name, avatar_url")
       .eq("role", "EMPLOYEE")
       .eq("active", true)
       .order("full_name");
@@ -23,8 +254,7 @@ export async function getActiveEmployees(): Promise<ActionResponse<Profile[]>> {
     if (error) {
       return { success: false, error: "Failed to load employees" };
     }
-
-    return { success: true, data: data as Profile[] };
+    return { success: true, data: data ?? [] };
   } catch {
     return { success: false, error: "Unauthorized" };
   }

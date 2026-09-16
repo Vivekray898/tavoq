@@ -5,7 +5,9 @@ import { requireAdmin } from "@/lib/auth";
 import { clientSchema, type ClientInput } from "@/validators/schemas";
 import type { ActionResponse, Client } from "@/types/database";
 
-export async function getClients(): Promise<ActionResponse<Client[]>> {
+export async function getClients(): Promise<
+  ActionResponse<Array<Client & { projects_count: number }>>
+> {
   try {
     await requireAdmin();
 
@@ -16,16 +18,43 @@ export async function getClients(): Promise<ActionResponse<Client[]>> {
       .order("name");
 
     if (error) {
+      console.error("[getClients]", error);
       return { success: false, error: "Failed to load clients" };
     }
 
-    return { success: true, data: data as Client[] };
+    // Count non-archived projects per client
+    const { data: projects } = await supabase
+      .from("projects")
+      .select("client_id")
+      .neq("status", "ARCHIVED");
+
+    const counts = new Map<string, number>();
+    (projects ?? []).forEach((p: { client_id: string }) => {
+      counts.set(p.client_id, (counts.get(p.client_id) ?? 0) + 1);
+    });
+
+    return {
+      success: true,
+      data: (data ?? []).map((c) => ({
+        ...(c as Client),
+        projects_count: counts.get(c.id) ?? 0,
+      })),
+    };
   } catch {
     return { success: false, error: "Unauthorized" };
   }
 }
 
-export async function getClient(id: string): Promise<ActionResponse<Client>> {
+export interface ClientDetail extends Client {
+  projects: Array<{
+    id: string;
+    name: string;
+    status: string;
+    active_tasks: number;
+  }>;
+}
+
+export async function getClient(id: string): Promise<ActionResponse<ClientDetail>> {
   try {
     await requireAdmin();
 
@@ -36,11 +65,41 @@ export async function getClient(id: string): Promise<ActionResponse<Client>> {
       .eq("id", id)
       .single();
 
-    if (error) {
+    if (error || !data) {
       return { success: false, error: "Client not found" };
     }
 
-    return { success: true, data: data as Client };
+    const { data: projects } = await supabase
+      .from("projects")
+      .select("id, name, status")
+      .eq("client_id", id)
+      .neq("status", "ARCHIVED")
+      .order("created_at", { ascending: false });
+
+    // Active task counts per project
+    const projectIds = (projects ?? []).map((p: { id: string }) => p.id);
+    const counts = new Map<string, number>();
+    if (projectIds.length > 0) {
+      const { data: tasks } = await supabase
+        .from("tasks")
+        .select("project_id")
+        .in("project_id", projectIds)
+        .not("status", "in", '("COMPLETED")');
+      (tasks ?? []).forEach((t: { project_id: string }) => {
+        counts.set(t.project_id, (counts.get(t.project_id) ?? 0) + 1);
+      });
+    }
+
+    return {
+      success: true,
+      data: {
+        ...(data as Client),
+        projects: (projects ?? []).map((p: { id: string; name: string; status: string }) => ({
+          ...p,
+          active_tasks: counts.get(p.id) ?? 0,
+        })),
+      },
+    };
   } catch {
     return { success: false, error: "Unauthorized" };
   }
@@ -54,7 +113,7 @@ export async function createClientAction(
 
     const validated = clientSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: "Invalid input" };
+      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
     }
 
     const supabase = await createClient();
@@ -67,13 +126,13 @@ export async function createClientAction(
         phone: validated.data.phone || null,
         website: validated.data.website || null,
         notes: validated.data.notes || null,
-        logo_url: validated.data.logo_url || null,
         active: validated.data.active ?? true,
       })
       .select()
       .single();
 
     if (error) {
+      console.error("[createClientAction]", error);
       return { success: false, error: "Failed to create client" };
     }
 
@@ -92,7 +151,7 @@ export async function updateClientAction(
 
     const validated = clientSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: "Invalid input" };
+      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
     }
 
     const supabase = await createClient();
@@ -105,7 +164,6 @@ export async function updateClientAction(
         phone: validated.data.phone || null,
         website: validated.data.website || null,
         notes: validated.data.notes || null,
-        logo_url: validated.data.logo_url || null,
         active: validated.data.active ?? true,
       })
       .eq("id", id)
@@ -113,6 +171,7 @@ export async function updateClientAction(
       .single();
 
     if (error) {
+      console.error("[updateClientAction]", error);
       return { success: false, error: "Failed to update client" };
     }
 
@@ -122,32 +181,30 @@ export async function updateClientAction(
   }
 }
 
-export async function deleteClientAction(
-  id: string
-): Promise<ActionResponse> {
+/** Archive instead of delete (§56) — keeps history intact */
+export async function archiveClientAction(id: string): Promise<ActionResponse> {
   try {
     await requireAdmin();
-
     const supabase = await createClient();
-    const { error } = await supabase.from("clients").delete().eq("id", id);
-
+    const { error } = await supabase
+      .from("clients")
+      .update({ active: false })
+      .eq("id", id);
     if (error) {
-      return { success: false, error: "Failed to delete client" };
+      console.error("[archiveClientAction]", error);
+      return { success: false, error: "Failed to archive client" };
     }
-
     return { success: true };
   } catch {
     return { success: false, error: "Unauthorized" };
   }
 }
 
-/**
- * Get active clients (for dropdowns — accessible to employees too).
- */
+/** Used by project/task forms */
 export async function getActiveClients(): Promise<ActionResponse<Client[]>> {
   try {
+    await requireAdmin();
     const supabase = await createClient();
-
     const { data, error } = await supabase
       .from("clients")
       .select("*")
@@ -157,9 +214,8 @@ export async function getActiveClients(): Promise<ActionResponse<Client[]>> {
     if (error) {
       return { success: false, error: "Failed to load clients" };
     }
-
-    return { success: true, data: data as Client[] };
+    return { success: true, data: (data ?? []) as Client[] };
   } catch {
-    return { success: false, error: "Failed to load clients" };
+    return { success: false, error: "Unauthorized" };
   }
 }

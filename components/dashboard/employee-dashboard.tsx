@@ -2,256 +2,222 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import {
-  Clock,
-  Eye,
-  CheckCircle,
-  IndianRupee,
-  ArrowRight,
-  Calendar,
-} from "lucide-react";
-import { Card, CardContent } from "@/components/ui/card";
+import { ArrowRight, CheckCircle2, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SkeletonDashboard } from "@/components/shared/skeleton-loader";
-import { TaskStatusBadge } from "@/components/shared/status-badge";
-import { PriorityBadge } from "@/components/shared/priority-badge";
+import { SkeletonList } from "@/components/shared/skeleton-loader";
+import { EmptyState } from "@/components/shared/empty-state";
+import { TaskCard } from "@/components/tasks/task-card";
 import { createClient } from "@/lib/supabase/client";
 import {
-  getGreeting,
-  formatCurrency,
-  formatDate,
-  getRelativeTime,
-  isDueSoon,
-} from "@/lib/utils";
-import {
-  getEmployeeDashboardStats,
-  getMyActiveTasks,
-  type EmployeeDashboardStats,
-} from "@/lib/actions/employee-dashboard";
-import type { Profile, Task } from "@/types/database";
+  getEmployeeDashboard,
+  type EmployeeDashboardData,
+} from "@/lib/actions/dashboard";
+import { getGreeting, getRelativeTime } from "@/lib/utils";
 
 interface EmployeeDashboardProps {
-  profile: Profile;
+  firstName: string;
 }
 
-export function EmployeeDashboard({ profile }: EmployeeDashboardProps) {
-  const [stats, setStats] = useState<EmployeeDashboardStats | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
+export function EmployeeDashboard({ firstName }: EmployeeDashboardProps) {
+  const [data, setData] = useState<EmployeeDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [live, setLive] = useState(false);
-  const isFetchingRef = useRef(false);
+  const fetchingRef = useRef(false);
 
-  const refreshAll = useCallback(async () => {
-    if (isFetchingRef.current) return;
-    isFetchingRef.current = true;
+  const refresh = useCallback(async () => {
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
     try {
-      const [statsRes, tasksRes] = await Promise.all([
-        getEmployeeDashboardStats(),
-        getMyActiveTasks(10),
-      ]);
-      if (statsRes.success && statsRes.data) setStats(statsRes.data);
-      if (tasksRes.success && tasksRes.data) setTasks(tasksRes.data);
+      const result = await getEmployeeDashboard();
+      if (result.success && result.data) setData(result.data);
     } finally {
-      isFetchingRef.current = false;
+      fetchingRef.current = false;
     }
   }, []);
 
-  // Initial load
   useEffect(() => {
-    (async () => {
-      await refreshAll();
-      setLoading(false);
-    })();
-  }, [refreshAll]);
+    refresh().finally(() => setLoading(false));
+  }, [refresh]);
 
-  // Realtime: watch this employee's tasks + payments
+  // Realtime: my tasks change → refresh (scoped to assigned_to = me)
   useEffect(() => {
     const supabase = createClient();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(refresh, 500);
+    };
 
     const channel = supabase
-      .channel(`employee-dashboard-${profile.id}`)
-      // Tasks assigned to me changing (status, deadline, payout, etc.)
+      .channel("employee-dashboard")
       .on(
         "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "tasks",
-          filter: `assigned_to=eq.${profile.id}`,
-        },
-        () => {
-          refreshAll();
-        }
+        { event: "*", schema: "public", table: "tasks" },
+        schedule
       )
-      // Payments affecting my tasks (admin marks paid)
       .on(
         "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "payments",
-        },
-        () => {
-          refreshAll();
-        }
+        { event: "*", schema: "public", table: "payments" },
+        schedule
       )
-      .subscribe((status) => {
-        setLive(status === "SUBSCRIBED");
-      });
+      .subscribe();
 
     return () => {
+      if (timer) clearTimeout(timer);
       supabase.removeChannel(channel);
     };
-  }, [profile.id, refreshAll]);
+  }, [refresh]);
 
-  if (loading) {
-    return <SkeletonDashboard />;
+  if (loading || !data) {
+    return (
+      <div className="space-y-6">
+        <SkeletonList rows={4} />
+      </div>
+    );
   }
 
-  const statCards = [
-    {
-      title: "Due Today",
-      value: stats?.dueToday ?? 0,
-      icon: Clock,
-      color: "text-orange-600",
-      bg: "bg-orange-50 dark:bg-orange-900/20",
-    },
-    {
-      title: "Needs Review",
-      value: stats?.needsReview ?? 0,
-      icon: Eye,
-      color: "text-purple-600",
-      bg: "bg-purple-50 dark:bg-purple-900/20",
-    },
-    {
-      title: "Completed This Month",
-      value: stats?.completed ?? 0,
-      icon: CheckCircle,
-      color: "text-green-600",
-      bg: "bg-green-50 dark:bg-green-900/20",
-    },
-    {
-      title: "Pending Payment",
-      value: formatCurrency(stats?.pendingPayment ?? 0),
-      icon: IndianRupee,
-      color: "text-yellow-600",
-      bg: "bg-yellow-50 dark:bg-yellow-900/20",
-    },
-  ];
-
   return (
-    <div className="space-y-6">
-      {/* Welcome */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {getGreeting()}, {profile.full_name.split(" ")[0]}
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Here&apos;s what you need to work on today.
-          </p>
-        </div>
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
-          <span
-            className={`inline-block size-2 rounded-full ${
-              live ? "bg-green-500 animate-pulse" : "bg-gray-400"
-            }`}
-          />
-          {live ? "Live" : "Connecting…"}
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {statCards.map((stat) => (
-          <Card key={stat.title}>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-3">
-                <div className={`p-2 rounded-lg ${stat.bg}`}>
-                  <stat.icon className={`size-5 ${stat.color}`} />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold">{stat.value}</p>
-                  <p className="text-xs text-muted-foreground">{stat.title}</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      {/* Active Tasks */}
+    <div className="space-y-8">
+      {/* Header (§10): what do I need to do? */}
       <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">My Tasks</h2>
-          <Link href="/tasks">
-            <Button variant="ghost" size="sm">
-              View all
-              <ArrowRight className="size-4 ml-1" />
-            </Button>
-          </Link>
-        </div>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+          {getGreeting()}, {firstName} 👋
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {data.due_today_count > 0
+            ? `You have ${data.due_today_count} task${data.due_today_count !== 1 ? "s" : ""} due today.`
+            : data.upcoming.length > 0
+              ? "Nothing due today — here's what's coming up."
+              : "You're all caught up."}
+        </p>
+      </div>
 
-        <div className="space-y-3">
-          {tasks.length === 0 ? (
-            <Card>
-              <CardContent className="py-12 text-center">
-                <p className="text-muted-foreground">
-                  You&apos;re all caught up 🎉
-                </p>
-              </CardContent>
-            </Card>
-          ) : (
-            tasks.map((task) => {
-              const urgent = task.deadline && isDueSoon(task.deadline);
-              return (
-                <Link key={task.id} href={`/tasks/${task.id}`}>
-                  <Card className="hover:shadow-sm transition-shadow cursor-pointer">
-                    <CardContent className="p-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <h3 className="font-medium truncate">
-                              {task.title}
-                            </h3>
-                            {urgent && (
-                              <span className="shrink-0 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-destructive/10 text-destructive">
-                                <Clock className="size-3" />
-                                Due soon
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2 mt-2 flex-wrap">
-                            <TaskStatusBadge status={task.status} />
-                            <PriorityBadge priority={task.priority} />
-                          </div>
-                        </div>
-                        <div className="text-right shrink-0">
-                          {task.deadline && (
-                            <>
-                              <p className="text-sm text-muted-foreground flex items-center gap-1 justify-end">
-                                <Calendar className="size-3" />
-                                {formatDate(task.deadline)}
-                              </p>
-                              <p className="text-[10px] text-muted-foreground mt-0.5">
-                                {getRelativeTime(task.deadline)}
-                              </p>
-                            </>
-                          )}
-                          {task.payout_amount > 0 && (
-                            <p className="text-sm font-medium text-green-600 mt-1">
-                              {formatCurrency(task.payout_amount)}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                </Link>
-              );
-            })
-          )}
-        </div>
+      {/* Due today */}
+      <section>
+        <h2 className="mb-3 text-sm font-semibold text-foreground">Due today</h2>
+        {data.due_today.length === 0 ? (
+          <p className="rounded-xl border bg-card px-4 py-6 text-center text-sm text-muted-foreground">
+            <CheckCircle2 className="mr-1.5 inline size-4 text-emerald-500" />
+            Nothing due today. Nice work!
+          </p>
+        ) : (
+          <div className="space-y-2.5">
+            {data.due_today.map((t) => (
+              <TaskCard
+                key={t.id}
+                href={`/tasks/${t.id}`}
+                title={t.title}
+                projectName={t.project_name}
+                status={t.status as never}
+                priority={t.priority}
+                deadline={t.deadline}
+                payoutAmount={t.payout_amount}
+                paymentStatus={t.payment_status}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Upcoming */}
+      {data.upcoming.length > 0 && (
+        <section>
+          <h2 className="mb-3 text-sm font-semibold text-foreground">Upcoming</h2>
+          <div className="space-y-2.5">
+            {data.upcoming.map((t) => (
+              <TaskCard
+                key={t.id}
+                href={`/tasks/${t.id}`}
+                title={t.title}
+                projectName={t.project_name}
+                status={t.status as never}
+                priority={t.priority}
+                deadline={t.deadline}
+                payoutAmount={t.payout_amount}
+                compact
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Waiting for review */}
+      {data.waiting_review.length > 0 && (
+        <section>
+          <h2 className="mb-3 text-sm font-semibold text-foreground">
+            Waiting for review
+          </h2>
+          <div className="divide-y rounded-xl border bg-card">
+            {data.waiting_review.map((t) => (
+              <Link
+                key={t.id}
+                href={`/tasks/${t.id}`}
+                className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/50"
+              >
+                <Clock className="size-4 shrink-0 text-violet-500" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{t.title}</p>
+                  <p className="truncate text-[13px] text-muted-foreground">
+                    {t.project_name}
+                  </p>
+                </div>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {t.submitted_at ? `Submitted ${getRelativeTime(t.submitted_at)}` : "Submitted"}
+                </span>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Recently completed */}
+      {data.recently_completed.length > 0 && (
+        <section>
+          <h2 className="mb-3 text-sm font-semibold text-foreground">
+            Recently completed
+          </h2>
+          <div className="divide-y rounded-xl border bg-card">
+            {data.recently_completed.map((t) => (
+              <Link
+                key={t.id}
+                href={`/tasks/${t.id}`}
+                className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-accent/50"
+              >
+                <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{t.title}</p>
+                </div>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {t.payment_status === "PAID"
+                    ? "Paid"
+                    : t.payout_amount > 0
+                      ? "Payment pending"
+                      : t.completed_at
+                        ? getRelativeTime(t.completed_at)
+                        : ""}
+                </span>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {data.due_today.length === 0 &&
+        data.upcoming.length === 0 &&
+        data.waiting_review.length === 0 && (
+          <EmptyState
+            title="You're all caught up 🎉"
+            description="No pending work right now. New assignments will show up here."
+            icon={<CheckCircle2 />}
+          />
+        )}
+
+      {/* Quick link to all tasks */}
+      <div className="flex justify-center pb-2">
+        <Link href="/tasks">
+          <Button variant="outline" size="sm">
+            View all my tasks <ArrowRight className="size-3.5" />
+          </Button>
+        </Link>
       </div>
     </div>
   );

@@ -41,6 +41,14 @@ async function sendEmail({ to, subject, html }: SendEmailOptions) {
 // Email Templates
 // ──────────────────────────────────────────────
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function baseTemplate(title: string, content: string): string {
   return `
     <!DOCTYPE html>
@@ -71,7 +79,7 @@ function baseTemplate(title: string, content: string): string {
 }
 
 // ──────────────────────────────────────────────
-// Notification Emails
+// Notification Emails (important events only)
 // ──────────────────────────────────────────────
 
 export async function sendTaskAssignedEmail(
@@ -83,8 +91,14 @@ export async function sendTaskAssignedEmail(
   deadline: string | null,
   payoutAmount: number
 ) {
+  const safeName = escapeHtml(employeeName);
+  const safeTitle = escapeHtml(taskTitle);
+  const safeProject = escapeHtml(projectName);
+  const safeClient = escapeHtml(clientName);
+
   const deadlineStr = deadline
-    ? new Date(deadline).toLocaleDateString("en-IN", {
+    ? new Date(deadline).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
         day: "numeric",
         month: "long",
         year: "numeric",
@@ -94,14 +108,14 @@ export async function sendTaskAssignedEmail(
     : "No deadline set";
 
   const content = `
-    <p>Hi ${employeeName},</p>
+    <p>Hi ${safeName},</p>
     <p>You have been assigned a new task:</p>
     <div style="background:#f9f9f9;border-radius:6px;padding:16px;margin:16px 0;">
-      <p style="font-weight:600;margin:0 0 8px;">${taskTitle}</p>
-      <p style="margin:0 0 4px;color:#737373;"><strong>Client:</strong> ${clientName}</p>
-      <p style="margin:0 0 4px;color:#737373;"><strong>Project:</strong> ${projectName}</p>
+      <p style="font-weight:600;margin:0 0 8px;">${safeTitle}</p>
+      ${safeClient ? `<p style="margin:0 0 4px;color:#737373;"><strong>Client:</strong> ${safeClient}</p>` : ""}
+      ${safeProject ? `<p style="margin:0 0 4px;color:#737373;"><strong>Project:</strong> ${safeProject}</p>` : ""}
       <p style="margin:0 0 4px;color:#737373;"><strong>Deadline:</strong> ${deadlineStr}</p>
-      <p style="margin:0;color:#737373;"><strong>Payout:</strong> ₹${payoutAmount.toLocaleString("en-IN")}</p>
+      ${payoutAmount > 0 ? `<p style="margin:0;color:#737373;"><strong>Payout:</strong> ₹${payoutAmount.toLocaleString("en-IN")}</p>` : ""}
     </div>
     <p>
       <a href="${APP_URL}/tasks" style="display:inline-block;background:#171717;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:500;">
@@ -123,10 +137,14 @@ export async function sendRevisionRequestedEmail(
   taskTitle: string,
   comment?: string
 ) {
+  const safeName = escapeHtml(employeeName);
+  const safeTitle = escapeHtml(taskTitle);
+  const safeComment = comment ? escapeHtml(comment) : "";
+
   const content = `
-    <p>Hi ${employeeName},</p>
-    <p>Your task <strong>${taskTitle}</strong> has been sent back for revision.</p>
-    ${comment ? `<p style="background:#fff7ed;border-left:3px solid #f97316;padding:12px 16px;margin:16px 0;border-radius:0 6px 6px 0;"><em>${comment}</em></p>` : ""}
+    <p>Hi ${safeName},</p>
+    <p>Your task <strong>${safeTitle}</strong> has been sent back for revision.</p>
+    ${safeComment ? `<p style="background:#fff7ed;border-left:3px solid #f97316;padding:12px 16px;margin:16px 0;border-radius:0 6px 6px 0;"><em>${safeComment}</em></p>` : ""}
     <p>Please make the requested changes and resubmit.</p>
     <p>
       <a href="${APP_URL}/tasks" style="display:inline-block;background:#171717;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:500;">
@@ -147,9 +165,12 @@ export async function sendTaskApprovedEmail(
   employeeName: string,
   taskTitle: string
 ) {
+  const safeName = escapeHtml(employeeName);
+  const safeTitle = escapeHtml(taskTitle);
+
   const content = `
-    <p>Hi ${employeeName},</p>
-    <p>Your task <strong>${taskTitle}</strong> has been approved! 🎉</p>
+    <p>Hi ${safeName},</p>
+    <p>Your task <strong>${safeTitle}</strong> has been approved! 🎉</p>
     <p>Great work!</p>
   `;
 
@@ -167,13 +188,17 @@ export async function sendPaymentPaidEmail(
   amount: number,
   paymentNote?: string
 ) {
+  const safeName = escapeHtml(employeeName);
+  const safeTitle = escapeHtml(taskTitle);
+  const safeNote = paymentNote ? escapeHtml(paymentNote) : "";
+
   const content = `
-    <p>Hi ${employeeName},</p>
+    <p>Hi ${safeName},</p>
     <p>A payment has been recorded for your task:</p>
     <div style="background:#f0fdf4;border-radius:6px;padding:16px;margin:16px 0;">
-      <p style="font-weight:600;margin:0 0 8px;">${taskTitle}</p>
+      <p style="font-weight:600;margin:0 0 8px;">${safeTitle}</p>
       <p style="margin:0 0 4px;color:#737373;"><strong>Amount:</strong> ₹${amount.toLocaleString("en-IN")}</p>
-      ${paymentNote ? `<p style="margin:0;color:#737373;"><strong>Note:</strong> ${paymentNote}</p>` : ""}
+      ${safeNote ? `<p style="margin:0;color:#737373;"><strong>Note:</strong> ${safeNote}</p>` : ""}
     </div>
   `;
 

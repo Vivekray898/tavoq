@@ -1,4 +1,4 @@
-import { FileX } from "lucide-react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -11,6 +11,7 @@ interface EmptyStateProps {
     href?: string;
     onClick?: () => void;
   };
+  compact?: boolean;
   className?: string;
 }
 
@@ -19,34 +20,38 @@ export function EmptyState({
   description,
   icon,
   action,
+  compact,
   className,
 }: EmptyStateProps) {
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center py-16 px-4 text-center",
+        "flex flex-col items-center justify-center px-4 text-center",
+        compact ? "py-8" : "py-16",
         className
       )}
     >
-      <div className="rounded-full bg-muted p-4 mb-4">
-        {icon || <FileX className="size-8 text-muted-foreground" />}
-      </div>
-      <h3 className="text-lg font-medium text-foreground mb-1">{title}</h3>
+      {icon && (
+        <div className="mb-3 rounded-full bg-muted p-3.5 text-muted-foreground [&_svg]:size-6">
+          {icon}
+        </div>
+      )}
+      <h3 className="text-[15px] font-medium text-foreground">{title}</h3>
       {description && (
-        <p className="text-sm text-muted-foreground max-w-sm mb-6">
-          {description}
-        </p>
+        <p className="mt-1 max-w-sm text-sm text-muted-foreground">{description}</p>
       )}
       {action && (
-        <>
+        <div className="mt-5">
           {action.href ? (
-            <a href={action.href}>
-              <Button>{action.label}</Button>
-            </a>
+            <Link href={action.href}>
+              <Button size="sm">{action.label}</Button>
+            </Link>
           ) : (
-            <Button onClick={action.onClick}>{action.label}</Button>
+            <Button size="sm" onClick={action.onClick}>
+              {action.label}
+            </Button>
           )}
-        </>
+        </div>
       )}
     </div>
   );

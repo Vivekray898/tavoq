@@ -1,13 +1,16 @@
+import { redirect } from "next/navigation";
+import { getUserProfile } from "@/lib/auth";
 import { PageHeader } from "@/components/shared/page-header";
 import { ClientForm } from "@/components/clients/client-form";
 
-export default function NewClientPage() {
+export default async function NewClientPage() {
+  const profile = await getUserProfile();
+  if (!profile) redirect("/login");
+  if (profile.role !== "ADMIN") redirect("/projects");
+
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="New Client"
-        description="Add a new client to your agency"
-      />
+      <PageHeader title="Add client" />
       <ClientForm mode="create" />
     </div>
   );

@@ -147,6 +147,23 @@
   }
 }
 
+/* ── Safe-area helpers (§42) ─────────────────────── */
+@layer utilities {
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Standalone PWA: prevent pull-to-refresh jank and let content breathe */
+@media (display-mode: standalone) {
+  body {
+    overscroll-behavior-y: none;
+  }
+}
+
 @layer utilities {
   .text-success {
     color: var(--success);

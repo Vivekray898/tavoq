@@ -21,15 +21,49 @@ export type ResourceType =
   | "WEBSITE"
   | "OTHER";
 
+/**
+ * §27 — five statuses. (The DB enum also contains a legacy APPROVED
+ * value that migration 003 folds into COMPLETED; it is no longer used.)
+ */
 export type TaskStatus =
   | "TODO"
   | "IN_PROGRESS"
   | "SUBMITTED"
   | "REVISION_REQUIRED"
-  | "APPROVED"
   | "COMPLETED";
 
-export type TaskPriority = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+export type TaskPriority = "NONE" | "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+
+export type LabelColor =
+  | "GRAY"
+  | "RED"
+  | "ORANGE"
+  | "AMBER"
+  | "GREEN"
+  | "TEAL"
+  | "BLUE"
+  | "VIOLET"
+  | "PINK";
+
+export type ActivityType =
+  | "TASK_CREATED"
+  | "TASK_ASSIGNED"
+  | "STATUS_CHANGED"
+  | "DEADLINE_CHANGED"
+  | "PRIORITY_CHANGED"
+  | "COMMENT_ADDED"
+  | "ATTACHMENT_ADDED"
+  | "ATTACHMENT_DELETED"
+  | "SUBTASK_ADDED"
+  | "SUBTASK_COMPLETED"
+  | "LABEL_ADDED"
+  | "LABEL_REMOVED"
+  | "RESOURCE_ADDED"
+  | "RESOURCE_REMOVED"
+  | "PAYMENT_PAID"
+  | "TASK_COMPLETED";
+
+export type TaskView = "list" | "board" | "calendar" | "table";
 
 export type PaymentStatus = "NOT_APPLICABLE" | "PENDING" | "PAID";
 
@@ -58,6 +92,7 @@ export interface Profile {
   role: UserRole;
   phone: string | null;
   active: boolean;
+  notification_prefs?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -119,6 +154,7 @@ export interface Task {
   deadline: string | null;
   payout_amount: number;
   payment_status: PaymentStatus;
+  sort_order: number;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -166,6 +202,42 @@ export interface Notification {
   created_at: string;
 }
 
+export interface Label {
+  id: string;
+  name: string;
+  color: LabelColor;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface TaskSubtask {
+  id: string;
+  task_id: string;
+  title: string;
+  done: boolean;
+  position: number;
+  created_at: string;
+}
+
+export interface SavedFilter {
+  id: string;
+  user_id: string;
+  name: string;
+  filters: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface Activity {
+  id: string;
+  task_id: string | null;
+  project_id: string | null;
+  client_id: string | null;
+  actor_id: string | null;
+  type: ActivityType;
+  detail: string | null;
+  created_at: string;
+}
+
 export interface UserDevice {
   id: string;
   user_id: string;
@@ -183,6 +255,7 @@ export interface TaskWithRelations extends Task {
   project?: Project;
   assigned_user?: Profile;
   created_user?: Profile;
+  labels?: Label[];
   comments_count?: number;
   attachments_count?: number;
 }
@@ -225,6 +298,11 @@ export interface ActionResponse<T = void> {
   error?: string;
 }
 
+export interface ActivityWithActor extends Activity {
+  actor?: { id: string; full_name: string; avatar_url: string | null } | null;
+  task?: { id: string; title: string } | null;
+}
+
 export interface DashboardStats {
   activeProjects: number;
   activeTasks: number;
@@ -264,3 +342,6 @@ export type InsertTaskComment = Omit<TaskComment, "id" | "created_at">;
 export type InsertTaskAttachment = Omit<TaskAttachment, "id" | "created_at">;
 export type InsertPayment = Omit<Payment, "id" | "created_at">;
 export type InsertNotification = Omit<Notification, "id" | "created_at">;
+export type InsertLabel = Omit<Label, "id" | "created_at">;
+export type InsertTaskSubtask = Omit<TaskSubtask, "id" | "created_at">;
+export type InsertSavedFilter = Omit<SavedFilter, "id" | "created_at">;

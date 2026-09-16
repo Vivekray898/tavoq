@@ -4,22 +4,14 @@ import { AdminDashboard } from "@/components/dashboard/admin-dashboard";
 import { EmployeeDashboard } from "@/components/dashboard/employee-dashboard";
 
 export default async function DashboardPage() {
-  let profile;
-
-  try {
-    profile = await getUserProfile();
-  } catch (err) {
-    console.error("Failed to load profile:", err);
-    redirect("/login");
-  }
-
+  const profile = await getUserProfile();
   if (!profile) {
     redirect("/login");
   }
 
   if (profile.role === "ADMIN") {
-    return <AdminDashboard profile={profile} />;
+    return <AdminDashboard firstName={profile.full_name.split(" ")[0]} />;
   }
 
-  return <EmployeeDashboard profile={profile} />;
+  return <EmployeeDashboard firstName={profile.full_name.split(" ")[0]} />;
 }

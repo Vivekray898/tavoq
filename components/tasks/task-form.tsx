@@ -1,11 +1,9 @@
-// components/tasks/task-form.tsx
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Loader2 } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Loader2, ChevronDown } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -17,189 +15,238 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Field, FieldLabel, FieldError, FieldGroup } from "@/components/ui/field";
-import { taskSchema, type TaskInput } from "@/validators/schemas";
-import { createTaskAction, updateTaskAction, getProjectsForTask } from "@/lib/actions/tasks";
+import {
+  createTaskAction,
+  updateTaskAction,
+  getProjectsForTask,
+} from "@/lib/actions/tasks";
 import { getActiveEmployees } from "@/lib/actions/employees";
-import { TASK_STATUS_LABELS, PRIORITY_LABELS, PAYMENT_STATUS_LABELS } from "@/lib/constants";
-import { toast } from "sonner";
-import type { Task, Profile } from "@/types/database";
+import { getLabels } from "@/lib/actions/task-extras";
+import { LABEL_CHIP, PRIORITY_LABELS } from "@/lib/constants";
+import { cn } from "@/lib/utils";
+import { taskSchema, type TaskInput } from "@/validators/schemas";
+import type { Label, Task } from "@/types/database";
 
 interface TaskFormProps {
   task?: Task;
   mode: "create" | "edit";
 }
 
+/** Combine IST date + time inputs into a UTC ISO instant (§29). */
+function toISTInstant(dateStr: string, timeStr: string): string {
+  if (!dateStr) return "";
+  // dateStr: "2026-09-18", timeStr: "18:00"
+  const t = timeStr || "18:00";
+  return new Date(`${dateStr}T${t}:00+05:30`).toISOString();
+}
+
+function fromISTInstant(iso: string | null): { date: string; time: string } {
+  if (!iso) return { date: "", time: "" };
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return { date: "", time: "" };
+  const ist = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => ist.find((p) => p.type === t)?.value ?? "";
+  let hour = get("hour");
+  if (hour === "24") hour = "00";
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, time: `${hour}:${get("minute")}` };
+}
+
 export function TaskForm({ task, mode }: TaskFormProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
   const [isLoading, setIsLoading] = useState(false);
   const [projects, setProjects] = useState<Array<{ id: string; name: string; client_name: string }>>([]);
-  const [employees, setEmployees] = useState<Profile[]>([]);
+  const [employees, setEmployees] = useState<Array<{ id: string; full_name: string }>>([]);
   const [loadingData, setLoadingData] = useState(true);
+  const [moreOpen, setMoreOpen] = useState(mode === "edit");
 
-  const {
-    register,
-    handleSubmit,
-    setValue,
-    watch,
-    formState: { errors },
-  } = useForm<TaskInput>({
-    resolver: zodResolver(taskSchema),
-    defaultValues: {
-      project_id: task?.project_id ?? "",
-      assigned_to: task?.assigned_to ?? "",
-      title: task?.title ?? "",
-      description: task?.description ?? "",
-      status: task?.status ?? "TODO",
-      priority: task?.priority ?? "MEDIUM",
-      deadline: task?.deadline
-        ? new Date(task.deadline).toISOString().slice(0, 16)
-        : "",
-      payout_amount: task?.payout_amount ?? 0,
-      payment_status: task?.payment_status ?? "NOT_APPLICABLE",
-    },
-  });
-
-  const selectedStatus = watch("status");
-  const selectedPriority = watch("priority");
-  const selectedPaymentStatus = watch("payment_status");
+  const [projectId, setProjectId] = useState(
+    task?.project_id ?? searchParams.get("project") ?? ""
+  );
+  const [assignedTo, setAssignedTo] = useState(
+    task?.assigned_to ?? searchParams.get("assignee") ?? ""
+  );
+  const [title, setTitle] = useState(task?.title ?? "");
+  const [description, setDescription] = useState(task?.description ?? "");
+  const [priority, setPriority] = useState(task?.priority ?? "MEDIUM");
+  const [payout, setPayout] = useState(
+    task?.payout_amount ? String(Number(task.payout_amount)) : ""
+  );
+  const initial = fromISTInstant(task?.deadline ?? null);
+  const [dueDate, setDueDate] = useState(initial.date);
+  const [dueTime, setDueTime] = useState(initial.time || "18:00");
+  const [paymentStatus, setPaymentStatus] = useState(task?.payment_status ?? "NOT_APPLICABLE");
+  const [labels, setLabels] = useState<Label[]>([]);
+  const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>(
+    // Edit mode: prefill from existing labels if the caller provided them
+    []
+  );
+  const [subtaskLines, setSubtaskLines] = useState<string[]>([]);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    async function loadData() {
-      const [projectsResult, employeesResult] = await Promise.all([
+    (async () => {
+      const [projectsRes, empsRes, labelsRes] = await Promise.all([
         getProjectsForTask(),
         getActiveEmployees(),
+        getLabels(),
       ]);
-
-      if (projectsResult.success && projectsResult.data) {
-        setProjects(projectsResult.data);
-      }
-      if (employeesResult.success && employeesResult.data) {
-        setEmployees(employeesResult.data);
-      }
+      if (projectsRes.success && projectsRes.data) setProjects(projectsRes.data);
+      if (empsRes.success && empsRes.data) setEmployees(empsRes.data);
+      if (labelsRes.success && labelsRes.data) setLabels(labelsRes.data);
       setLoadingData(false);
-    }
-    loadData();
+    })();
   }, []);
 
-  async function onSubmit(data: TaskInput) {
-    setIsLoading(true);
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setErrors({});
 
+    const deadline = toISTInstant(dueDate, dueTime);
+    const subtasks = subtaskLines
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((t) => ({ title: t }));
+    const input: TaskInput = {
+      project_id: projectId,
+      assigned_to: assignedTo || "",
+      title: title.trim(),
+      description,
+      priority: priority as TaskInput["priority"],
+      deadline,
+      payout_amount: payout ? Number(payout) : 0,
+      payment_status: paymentStatus,
+      label_ids: selectedLabelIds.length > 0 ? selectedLabelIds : undefined,
+      subtasks: subtasks.length > 0 ? subtasks : undefined,
+      ...(mode === "edit" ? { status: task?.status } : {}),
+    };
+
+    // Client-side validation
+    const parsed = taskSchema.safeParse(input);
+    if (!parsed.success) {
+      const fieldErrors: Record<string, string> = {};
+      parsed.error.issues.forEach((issue) => {
+        const key = issue.path.join(".");
+        if (key && !fieldErrors[key]) fieldErrors[key] = issue.message;
+      });
+      setErrors(fieldErrors);
+      if (fieldErrors.title) {
+        toast.error(fieldErrors.title);
+      }
+      return;
+    }
+
+    setIsLoading(true);
     const result =
       mode === "create"
-        ? await createTaskAction(data)
-        : await updateTaskAction(task!.id, data);
+        ? await createTaskAction(input)
+        : await updateTaskAction(task!.id, input);
 
     if (result.success) {
       toast.success(mode === "create" ? "Task created" : "Task updated");
-      router.push(mode === "create" ? "/tasks" : `/tasks/${task!.id}`);
-      router.refresh();
+      router.push(mode === "create" ? `/tasks/${result.data?.id}` : `/tasks/${task!.id}`);
     } else {
-      toast.error(result.error || "Something went wrong");
+      toast.error(result.error ?? "Something went wrong");
+      setIsLoading(false);
     }
-
-    setIsLoading(false);
   }
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-6 max-w-2xl">
+    <form onSubmit={onSubmit} className="max-w-xl space-y-5">
       <FieldGroup>
         <Field>
-          <FieldLabel htmlFor="project_id">Project *</FieldLabel>
-          <Select
-            value={watch("project_id") ?? ""}
-            onValueChange={(value) => { if (value) setValue("project_id", value); }}
-            disabled={isLoading || loadingData}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select a project" />
-            </SelectTrigger>
-            <SelectContent>
-              {projects.map((project) => (
-                <SelectItem key={project.id} value={project.id}>
-                  {project.name} — {project.client_name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <FieldError errors={errors.project_id ? [errors.project_id] : []} />
-        </Field>
-
-        <Field>
-          <FieldLabel htmlFor="title">Task Title *</FieldLabel>
+          <FieldLabel htmlFor="title">Task title *</FieldLabel>
           <Input
             id="title"
-            placeholder="e.g. Create 5 Instagram Posts"
+            placeholder="e.g. Create 5 Instagram posts"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
             disabled={isLoading}
-            {...register("title")}
+            autoFocus
           />
-          <FieldError errors={errors.title ? [errors.title] : []} />
+          {errors.title && <FieldError errors={[{ message: errors.title }]} />}
         </Field>
 
-        <Field>
-          <FieldLabel htmlFor="description">Description</FieldLabel>
-          <Textarea
-            id="description"
-            placeholder="Describe what needs to be done..."
-            rows={4}
-            disabled={isLoading}
-            {...register("description")}
-          />
-        </Field>
-
-        <Field>
-          <FieldLabel htmlFor="assigned_to">Assigned To</FieldLabel>
-          <Select
-            value={watch("assigned_to") ?? ""}
-            onValueChange={(value) => setValue("assigned_to", value || "")}
-            disabled={isLoading || loadingData}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select an employee" />
-            </SelectTrigger>
-            <SelectContent>
-              {employees.map((emp) => (
-                <SelectItem key={emp.id} value={emp.id}>
-                  {emp.full_name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <Field>
-            <FieldLabel htmlFor="deadline">Deadline</FieldLabel>
-            <Input
-              id="deadline"
-              type="datetime-local"
-              disabled={isLoading}
-              {...register("deadline")}
-            />
+            <FieldLabel>Project *</FieldLabel>
+            <Select
+              value={projectId}
+              onValueChange={(v) => setProjectId(v ?? "")}
+              disabled={isLoading || loadingData}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder={loadingData ? "Loading…" : "Select a project"} />
+              </SelectTrigger>
+              <SelectContent>
+                {projects.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.client_name ? `${p.client_name} — ${p.name}` : p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {errors.project_id && <FieldError errors={[{ message: errors.project_id }]} />}
           </Field>
 
           <Field>
-            <FieldLabel htmlFor="payout_amount">Payout (₹)</FieldLabel>
-            <Input
-              id="payout_amount"
-              type="number"
-              min="0"
-              step="50"
-              placeholder="0"
-              disabled={isLoading}
-              {...register("payout_amount", { valueAsNumber: true })}
-            />
-            <FieldError errors={errors.payout_amount ? [errors.payout_amount] : []} />
+            <FieldLabel>Assign to</FieldLabel>
+            <Select
+              value={assignedTo}
+              onValueChange={(v) => setAssignedTo(v ?? "")}
+              disabled={isLoading || loadingData}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder={loadingData ? "Loading…" : "Select an employee"} />
+              </SelectTrigger>
+              <SelectContent>
+                {employees.map((emp) => (
+                  <SelectItem key={emp.id} value={emp.id}>
+                    {emp.full_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <Field>
-            <FieldLabel>Priority</FieldLabel>
+            <FieldLabel htmlFor="dueDate">Due date</FieldLabel>
+            <Input
+              id="dueDate"
+              type="date"
+              value={dueDate}
+              onChange={(e) => setDueDate(e.target.value)}
+              disabled={isLoading}
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="dueTime">Time</FieldLabel>
+            <Input
+              id="dueTime"
+              type="time"
+              value={dueTime}
+              onChange={(e) => setDueTime(e.target.value)}
+              disabled={isLoading || !dueDate}
+            />
+          </Field>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">        <Field>
+          <FieldLabel>Priority</FieldLabel>
             <Select
-              value={selectedPriority ?? "MEDIUM"}
-              onValueChange={(value) => {
-                if (value) setValue("priority", value as TaskInput["priority"]);
-              }}
+              value={priority}
+              onValueChange={(v) => setPriority(((v ?? "MEDIUM") as TaskInput["priority"]) ?? "MEDIUM")}
               disabled={isLoading}
             >
               <SelectTrigger>
@@ -215,72 +262,133 @@ export function TaskForm({ task, mode }: TaskFormProps) {
             </Select>
           </Field>
 
-          {mode === "edit" && (
-            <>
-              <Field>
-                <FieldLabel>Status</FieldLabel>
-                <Select
-                  value={selectedStatus ?? "TODO"}
-                  onValueChange={(value) => {
-                    if (value) setValue("status", value as TaskInput["status"]);
-                  }}
-                  disabled={isLoading}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(TASK_STATUS_LABELS).map(([value, label]) => (
-                      <SelectItem key={value} value={value}>
-                        {label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-
-              <Field>
-                <FieldLabel>Payment</FieldLabel>
-                <Select
-                  value={selectedPaymentStatus ?? "NOT_APPLICABLE"}
-                  onValueChange={(value) => {
-                    if (value) setValue("payment_status", value as TaskInput["payment_status"]);
-                  }}
-                  disabled={isLoading}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(PAYMENT_STATUS_LABELS).map(([value, label]) => (
-                      <SelectItem key={value} value={value}>
-                        {label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-            </>
-          )}
+          <Field>
+            <FieldLabel htmlFor="payout">Payout (₹)</FieldLabel>
+            <Input
+              id="payout"
+              type="number"
+              min="0"
+              step="50"
+              placeholder="0"
+              value={payout}
+              onChange={(e) => setPayout(e.target.value)}
+              disabled={isLoading}
+            />
+          </Field>
         </div>
+
+        <Field>
+          <FieldLabel htmlFor="description">Instructions</FieldLabel>
+          <Textarea
+            id="description"
+            placeholder="What exactly needs to be done? Requirements, brand rules, links to use…"
+            rows={4}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            disabled={isLoading}
+          />
+        </Field>
       </FieldGroup>
 
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={isLoading}>
+      {/* More options (§19) */}
+      <button
+        type="button"
+        onClick={() => setMoreOpen((v) => !v)}
+        className="inline-flex items-center gap-1 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+      >
+        More options
+        <ChevronDown className={cn("size-4 transition-transform", moreOpen && "rotate-180")} />
+      </button>
+
+      {moreOpen && (
+        <div className="space-y-5">
+          {/* Labels (§19) */}
+          {labels.length > 0 && (
+            <Field>
+              <FieldLabel>Labels</FieldLabel>
+              <div className="flex flex-wrap gap-2">
+                {labels.map((l) => {
+                  const active = selectedLabelIds.includes(l.id);
+                  return (
+                    <button
+                      key={l.id}
+                      type="button"
+                      onClick={() =>
+                        setSelectedLabelIds((prev) =>
+                          prev.includes(l.id)
+                            ? prev.filter((id) => id !== l.id)
+                            : [...prev, l.id]
+                        )
+                      }
+                      className={cn(
+                        "rounded-full px-2.5 py-1 text-xs font-medium transition-opacity",
+                        LABEL_CHIP[l.color],
+                        !active && "opacity-40 hover:opacity-70"
+                      )}
+                    >
+                      {l.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </Field>
+          )}
+
+          {/* Subtasks (§21) — one per line */}
+          <Field>
+            <FieldLabel htmlFor="subtasks">Checklist</FieldLabel>
+            <Textarea
+              id="subtasks"
+              placeholder={"One item per line, e.g.\nWrite caption\nDesign post\nExport files"}
+              rows={3}
+              value={subtaskLines.join("\n")}
+              onChange={(e) => setSubtaskLines(e.target.value.split("\n"))}
+              disabled={isLoading}
+            />
+            <p className="text-xs text-muted-foreground">
+              Creates a checklist on the task your teammate can tick off.
+            </p>
+          </Field>
+
+          <Field>
+            <FieldLabel>Payment status</FieldLabel>
+            <Select
+              value={paymentStatus}
+              onValueChange={(v) => setPaymentStatus(((v ?? "NOT_APPLICABLE") as TaskInput["payment_status"]) ?? "NOT_APPLICABLE")}
+              disabled={isLoading}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="NOT_APPLICABLE">No payout</SelectItem>
+                <SelectItem value="PENDING">Payment pending</SelectItem>
+                <SelectItem value="PAID">Paid</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Tasks with a payout are automatically marked pending payment on completion.
+            </p>
+          </Field>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 pt-2">
+        <Button type="submit" disabled={isLoading || loadingData}>
           {isLoading ? (
             <>
               <Loader2 className="size-4 animate-spin" />
-              {mode === "create" ? "Creating..." : "Saving..."}
+              {mode === "create" ? "Creating…" : "Saving…"}
             </>
           ) : mode === "create" ? (
-            "Create Task"
+            "Create task"
           ) : (
-            "Save Changes"
+            "Save changes"
           )}
         </Button>
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           onClick={() => router.back()}
           disabled={isLoading}
         >

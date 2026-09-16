@@ -126,9 +126,9 @@ export const taskSchema = z.object({
   title: z.string().min(1, "Task title is required"),
   description: z.string().optional().or(z.literal("")),
   status: z
-    .enum(["TODO", "IN_PROGRESS", "SUBMITTED", "REVISION_REQUIRED", "APPROVED", "COMPLETED"])
+    .enum(["TODO", "IN_PROGRESS", "SUBMITTED", "REVISION_REQUIRED", "COMPLETED"])
     .optional(),
-  priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
+  priority: z.enum(["NONE", "LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
   deadline: z.string().optional().or(z.literal("")),
   payout_amount: z
     .number()
@@ -136,6 +136,11 @@ export const taskSchema = z.object({
     .optional(),
   payment_status: z
     .enum(["NOT_APPLICABLE", "PENDING", "PAID"])
+    .optional(),
+  label_ids: z.array(z.string().uuid()).optional(),
+  subtasks: z
+    .array(z.object({ title: z.string().min(1, "Subtask title is required") }))
+    .max(20, "Too many subtasks")
     .optional(),
 });
 
@@ -147,13 +152,46 @@ export const taskStatusSchema = z.object({
     "IN_PROGRESS",
     "SUBMITTED",
     "REVISION_REQUIRED",
-    "APPROVED",
     "COMPLETED",
   ]),
   comment: z.string().optional().or(z.literal("")),
 });
 
 export type TaskStatusInput = z.infer<typeof taskStatusSchema>;
+
+// ──────────────────────────────────────────────
+// Label Schemas (§19)
+// ──────────────────────────────────────────────
+
+export const labelSchema = z.object({
+  name: z.string().min(1, "Label name is required").max(30, "Label name is too long"),
+  color: z
+    .enum(["GRAY", "RED", "ORANGE", "AMBER", "GREEN", "TEAL", "BLUE", "VIOLET", "PINK"])
+    .optional(),
+});
+
+export type LabelInput = z.infer<typeof labelSchema>;
+
+// ──────────────────────────────────────────────
+// Subtask Schema (§21)
+// ──────────────────────────────────────────────
+
+export const subtaskSchema = z.object({
+  title: z.string().min(1, "Subtask title is required").max(200, "Subtask is too long"),
+});
+
+export type SubtaskInput = z.infer<typeof subtaskSchema>;
+
+// ──────────────────────────────────────────────
+// Saved Filter Schema (§25)
+// ──────────────────────────────────────────────
+
+export const savedFilterSchema = z.object({
+  name: z.string().min(1, "Name is required").max(50, "Name is too long"),
+  filters: z.record(z.string(), z.unknown()),
+});
+
+export type SavedFilterInput = z.infer<typeof savedFilterSchema>;
 
 // ──────────────────────────────────────────────
 // Comment Schema
@@ -198,6 +236,7 @@ export const taskFilterSchema = z.object({
   priority: z.string().optional(),
   assigned_to: z.string().optional(),
   project_id: z.string().optional(),
+  label_id: z.string().optional(),
   client_id: z.string().optional(),
   payment_status: z.string().optional(),
   overdue: z.boolean().optional(),

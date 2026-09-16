@@ -1,13 +1,21 @@
 -- ============================================================
 -- Taskora — Seed Data for Development
 -- ============================================================
--- NOTE: This seed file assumes you have already created
--- Supabase Auth users for admin and employees.
--- The profile records are auto-created by the trigger,
--- but you can use this to add sample data.
+-- Run migrations first (supabase/migrations), then this seed.
 --
--- Run this AFTER creating auth users via Supabase dashboard
--- or the signup flow.
+-- 1. Run: supabase/migrations/001_initial_schema.sql
+-- 2. Run: supabase/migrations/002_realtime_rls_storage.sql
+-- 3. Run: supabase/migrations/003_status_simplify.sql
+-- 4. Run: supabase/migrations/004_task_management_upgrades.sql
+--    (labels, subtasks, saved filters, activity stream, task ordering)
+-- 4. Create auth users (Supabase Dashboard → Authentication),
+--    then promote one to admin:
+--        UPDATE profiles SET role = 'ADMIN' WHERE email = '<admin-email>';
+-- 5. Add project members (required for employees to see projects):
+--        INSERT INTO project_members (project_id, user_id)
+--        VALUES ('b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', '<employee-uuid>');
+-- 6. Run this seed, then the sample task inserts at the bottom
+--    with real user UUIDs.
 -- ============================================================
 
 -- Sample Client

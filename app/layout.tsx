@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import { ThemeProvider } from "next-themes";
+import { PwaBootstrap } from "@/components/shared/pwa-bootstrap";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -15,14 +16,24 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Taskora — Agency Work Management",
-  description:
-    "Internal work management system for digital marketing agencies. Manage clients, projects, tasks, and payments.",
+  title: {
+    default: "Taskora",
+    template: "%s — Taskora",
+  },
+  description: "Simple team work management for your agency.",
   manifest: "/manifest.json",
+  applicationName: "Taskora",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
     title: "Taskora",
+  },
+  icons: {
+    icon: [
+      { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/icons/icon-192.png", sizes: "192x192" }],
   },
 };
 
@@ -30,6 +41,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
+  viewportFit: "cover",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
     { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
@@ -53,7 +65,8 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           {children}
-          <Toaster position="top-right" richColors closeButton />
+          <PwaBootstrap />
+          <Toaster position="top-center" richColors closeButton />
         </ThemeProvider>
       </body>
     </html>

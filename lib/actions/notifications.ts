@@ -15,7 +15,7 @@ export async function getNotifications(): Promise<ActionResponse<Notification[]>
       .select("*")
       .eq("user_id", profile.id)
       .order("created_at", { ascending: false })
-      .limit(50);
+      .limit(100);
 
     if (error) return { success: false, error: "Failed to load notifications" };
     return { success: true, data: (data ?? []) as Notification[] };
@@ -24,7 +24,7 @@ export async function getNotifications(): Promise<ActionResponse<Notification[]>
   }
 }
 
-export async function markAsRead(id: string): Promise<ActionResponse> {
+export async function markNotificationRead(id: string): Promise<ActionResponse> {
   try {
     const profile = await requireAuth();
     const supabase = await createClient();
@@ -42,7 +42,7 @@ export async function markAsRead(id: string): Promise<ActionResponse> {
   }
 }
 
-export async function markAllAsRead(): Promise<ActionResponse> {
+export async function markAllMyNotificationsRead(): Promise<ActionResponse> {
   try {
     const profile = await requireAuth();
     const supabase = await createClient();

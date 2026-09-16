@@ -3,20 +3,11 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import {
-  Bell,
-  Menu,
-  LogOut,
-  User,
-  ChevronDown,
-  Moon,
-  Sun,
-  Monitor,
-} from "lucide-react";
-import { useTheme } from "next-themes";
+import { Bell, LogOut, Search, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { buttonVariants } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { SearchDialog } from "@/components/shared/search-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,20 +15,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { getInitials } from "@/lib/utils";
-import { cn } from "@/lib/utils";
+import { getInitials, cn } from "@/lib/utils";
 import type { Profile } from "@/types/database";
 
 interface TopbarProps {
   profile: Profile;
-  unreadCount?: number;
-  onMenuToggle?: () => void;
 }
 
-export function Topbar({ profile, unreadCount = 0, onMenuToggle }: TopbarProps) {
+export function Topbar({ profile }: TopbarProps) {
   const router = useRouter();
-  const { theme, setTheme } = useTheme();
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
 
   async function handleSignOut() {
     setIsSigningOut(true);
@@ -48,40 +36,35 @@ export function Topbar({ profile, unreadCount = 0, onMenuToggle }: TopbarProps) 
   }
 
   return (
-    <header className="sticky top-0 z-40 flex h-14 items-center gap-4 border-b bg-background px-4 lg:px-6">
-      {/* Mobile menu button */}
+    <header className="sticky top-0 z-30 hidden h-14 items-center gap-3 border-b bg-background/95 px-6 backdrop-blur lg:flex">
+      {/* Search trigger */}
       <button
         type="button"
-        onClick={onMenuToggle}
+        onClick={() => setSearchOpen(true)}
         className={cn(
-          buttonVariants({ variant: "ghost", size: "icon" }),
-          "lg:hidden"
+          buttonVariants({ variant: "outline" }),
+          "h-8 w-64 justify-start gap-2 text-muted-foreground"
         )}
-        aria-label="Open menu"
       >
-        <Menu className="size-5" />
+        <Search className="size-3.5" />
+        <span className="text-[13px]">Search…</span>
+        <kbd className="pointer-events-none ml-auto rounded border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
+          ⌘K
+        </kbd>
       </button>
 
       <div className="flex-1" />
 
-      {/* Notifications — Link wraps an <a>, so we style it as a button via buttonVariants */}
+      {/* Notifications */}
       <Link
         href="/notifications"
-        className={cn(
-          buttonVariants({ variant: "ghost", size: "icon" }),
-          "relative"
-        )}
+        className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "relative")}
         aria-label="Notifications"
       >
-        <Bell className="size-5" />
-        {unreadCount > 0 && (
-          <span className="absolute -top-1 -right-1 flex size-4 items-center justify-center rounded-full bg-destructive text-[10px] font-medium text-destructive-foreground">
-            {unreadCount > 99 ? "99+" : unreadCount}
-          </span>
-        )}
+        <Bell className="size-4.5" strokeWidth={1.8} />
       </Link>
 
-      {/* User Menu — DropdownMenuTrigger itself is the button */}
+      {/* User menu */}
       <DropdownMenu>
         <DropdownMenuTrigger
           className={cn(
@@ -90,54 +73,32 @@ export function Topbar({ profile, unreadCount = 0, onMenuToggle }: TopbarProps) 
           )}
           aria-label="Open user menu"
         >
-          <Avatar className="size-8">
+          <Avatar className="size-7">
             <AvatarFallback className="text-xs">
               {getInitials(profile.full_name)}
             </AvatarFallback>
           </Avatar>
-          <span className="hidden sm:inline text-sm font-medium">
-            {profile.full_name}
-          </span>
-          <ChevronDown className="size-4 text-muted-foreground" />
+          <span className="text-sm font-medium">{profile.full_name}</span>
         </DropdownMenuTrigger>
 
-        <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuContent align="end" className="w-44">
           <DropdownMenuItem onClick={() => router.push("/profile")}>
-            <User className="size-4 mr-2" />
+            <User className="size-4" />
             Profile
           </DropdownMenuItem>
-
           <DropdownMenuSeparator />
-
-          {/* Theme Switcher */}
-          <DropdownMenuItem onClick={() => setTheme("light")}>
-            <Sun className="size-4 mr-2" />
-            Light
-            {theme === "light" && <span className="ml-auto">✓</span>}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setTheme("dark")}>
-            <Moon className="size-4 mr-2" />
-            Dark
-            {theme === "dark" && <span className="ml-auto">✓</span>}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setTheme("system")}>
-            <Monitor className="size-4 mr-2" />
-            System
-            {theme === "system" && <span className="ml-auto">✓</span>}
-          </DropdownMenuItem>
-
-          <DropdownMenuSeparator />
-
           <DropdownMenuItem
             onClick={handleSignOut}
             disabled={isSigningOut}
             className="text-destructive focus:text-destructive"
           >
-            <LogOut className="size-4 mr-2" />
-            {isSigningOut ? "Signing out..." : "Sign out"}
+            <LogOut className="size-4" />
+            {isSigningOut ? "Signing out…" : "Sign out"}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
     </header>
   );
 }

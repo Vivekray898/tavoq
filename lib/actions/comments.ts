@@ -3,16 +3,47 @@
 import { createClient } from "@/lib/supabase/server";
 import { requireAuth } from "@/lib/auth";
 import { createNotification } from "@/lib/notifications";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { commentSchema } from "@/validators/schemas";
 import type { ActionResponse, TaskComment } from "@/types/database";
 
 export async function addCommentAction(
   taskId: string,
-  comment: string
-): Promise<ActionResponse<TaskComment>> {
+  rawComment: string
+): Promise<ActionResponse<TaskComment & { user: { id: string; full_name: string; avatar_url: string | null } }>> {
   try {
     const profile = await requireAuth();
     const supabase = await createClient();
+
+    const validated = commentSchema.safeParse({ comment: rawComment });
+    if (!validated.success) {
+      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid comment" };
+    }
+    const comment = validated.data.comment;
+
+    // Verify access: assignee, project member, or admin
+    const { data: task } = await supabase
+      .from("tasks")
+      .select("id, title, assigned_to, project_id")
+      .eq("id", taskId)
+      .single();
+    if (!task) return { success: false, error: "Task not found" };
+
+    if (profile.role === "EMPLOYEE") {
+      const isAssignee = task.assigned_to === profile.id;
+      let isMember = false;
+      if (!isAssignee) {
+        const { data: member } = await supabase
+          .from("project_members")
+          .select("id")
+          .eq("project_id", task.project_id)
+          .eq("user_id", profile.id)
+          .maybeSingle();
+        isMember = !!member;
+      }
+      if (!isAssignee && !isMember) {
+        return { success: false, error: "You don't have access to this task" };
+      }
+    }
 
     const { data, error } = await supabase
       .from("task_comments")
@@ -25,25 +56,18 @@ export async function addCommentAction(
       .single();
 
     if (error) {
-      return { success: false, error: "Failed to add comment" };
+      console.error("[addCommentAction]", error);
+      return { success: false, error: "Failed to send message" };
     }
 
-    // Determine recipients: admins + the task's assignee (excluding the commenter)
-    const admin = createAdminClient();
-    const { data: task } = await admin
-      .from("tasks")
-      .select("title, assigned_to")
-      .eq("id", taskId)
-      .single();
-
+    // Notify the other side (assignee ↔ admins), excluding the author
+    const admin = (await import("@/lib/supabase/admin")).createAdminClient();
     const recipientIds = new Set<string>();
 
-    if (task?.assigned_to && task.assigned_to !== profile.id) {
+    if (task.assigned_to && task.assigned_to !== profile.id) {
       recipientIds.add(task.assigned_to);
     }
-
     if (profile.role === "EMPLOYEE") {
-      // Employee commented → notify all admins
       const { data: admins } = await admin
         .from("profiles")
         .select("id")
@@ -51,8 +75,7 @@ export async function addCommentAction(
         .eq("active", true);
       (admins ?? []).forEach((a) => recipientIds.add(a.id));
     }
-
-    // If admin commented and the task is assigned, assignee was already added above.
+    recipientIds.delete(profile.id);
 
     if (recipientIds.size > 0) {
       await Promise.all(
@@ -61,7 +84,7 @@ export async function addCommentAction(
             userId,
             type: "COMMENT_ADDED",
             title: "New comment",
-            message: `${profile.full_name} commented on "${task?.title ?? "a task"}": ${comment.slice(0, 80)}${comment.length > 80 ? "…" : ""}`,
+            message: `${profile.full_name} on "${task.title}": ${comment.slice(0, 80)}${comment.length > 80 ? "…" : ""}`,
             referenceType: "task",
             referenceId: taskId,
           })
@@ -69,9 +92,13 @@ export async function addCommentAction(
       );
     }
 
-    return { success: true, data: data as TaskComment };
-  } catch (err) {
-    console.error("[addCommentAction] error:", err);
+    return {
+      success: true,
+      data: data as TaskComment & {
+        user: { id: string; full_name: string; avatar_url: string | null };
+      },
+    };
+  } catch {
     return { success: false, error: "Unauthorized" };
   }
 }

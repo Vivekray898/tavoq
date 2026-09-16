@@ -3,28 +3,103 @@
 import { createClient } from "@/lib/supabase/server";
 import { requireAdmin, requireAuth, hasProjectAccess } from "@/lib/auth";
 import { taskSchema, type TaskInput } from "@/validators/schemas";
+import {
+  createNotification,
+  createNotifications,
+  sendEventEmail,
+} from "@/lib/notifications";
+import { ALLOWED_FILE_TYPES, MAX_FILE_SIZE } from "@/lib/constants";
 import type {
   ActionResponse,
   Task,
-  TaskWithRelations,
-  Notification,
+  TaskStatus,
 } from "@/types/database";
+
+// ──────────────────────────────────────────────
+// Shared query shape
+// ──────────────────────────────────────────────
+
+const TASK_SELECT = `
+  *,
+  project:projects(id, name, client:clients(id, name)),
+  assigned_user:profiles!tasks_assigned_to_fkey(id, full_name, avatar_url),
+  labels:task_labels(label:labels(id, name, color)),
+  subtasks:task_subtasks(id, done),
+  comments_count:task_comments(count),
+  attachments_count:task_attachments(count)
+` as const;
+
+interface AssignedUser {
+  id: string;
+  full_name: string;
+  avatar_url: string | null;
+}
+
+interface LabelRef {
+  label: { id: string; name: string; color: string } | null;
+}
+
+interface TaskRow {
+  project:
+    | { id: string; name: string; client: { id: string; name: string } | null }
+    | null;
+  assigned_user: AssignedUser | null;
+  labels?: LabelRef[] | null;
+  subtasks?: Array<{ id: string; done: boolean }> | null;
+  comments_count?: Array<{ count: number }> | null;
+  attachments_count?: Array<{ count: number }> | null;
+  [key: string]: unknown;
+}
+
+export interface TaskListItem extends Task {
+  project_name: string | null;
+  client_name: string | null;
+  assigned_name: string | null;
+  labels: Array<{ id: string; name: string; color: string }>;
+  subtasks_done: number;
+  subtasks_total: number;
+  comments_count: number;
+  attachments_count: number;
+}
+
+function toListItem(row: TaskRow): TaskListItem {
+  const task = row as unknown as Task;
+  const subtasks = row.subtasks ?? [];
+  return {
+    ...task,
+    project_name: row.project?.name ?? null,
+    client_name: row.project?.client?.name ?? null,
+    assigned_name: row.assigned_user?.full_name ?? null,
+    labels: (row.labels ?? [])
+      .map((l) => l.label)
+      .filter((l): l is { id: string; name: string; color: string } => !!l),
+    subtasks_done: subtasks.filter((s) => s.done).length,
+    subtasks_total: subtasks.length,
+    comments_count: row.comments_count?.[0]?.count ?? 0,
+    attachments_count: row.attachments_count?.[0]?.count ?? 0,
+  };
+}
+
+// ──────────────────────────────────────────────
+// Queries
+// ──────────────────────────────────────────────
 
 export async function getTasks(filters?: {
   status?: string;
   priority?: string;
   assigned_to?: string;
   project_id?: string;
-  client_id?: string;
+  label_id?: string;
   payment_status?: string;
-}): Promise<ActionResponse<TaskWithRelations[]>> {
+  q?: string;
+}): Promise<ActionResponse<TaskListItem[]>> {
   try {
     const profile = await requireAuth();
     const supabase = await createClient();
 
     let query = supabase
       .from("tasks")
-      .select("*, project:projects(*, client:clients(*)), assigned_user:profiles!tasks_assigned_to_fkey(full_name, avatar_url)")
+      .select(TASK_SELECT)
       .order("created_at", { ascending: false });
 
     // Employees only see their own tasks
@@ -32,35 +107,33 @@ export async function getTasks(filters?: {
       query = query.eq("assigned_to", profile.id);
     }
 
-    // Apply filters
-    if (filters?.status) {
-      query = query.eq("status", filters.status);
-    }
-    if (filters?.priority) {
-      query = query.eq("priority", filters.priority);
-    }
-    if (filters?.assigned_to) {
-      query = query.eq("assigned_to", filters.assigned_to);
-    }
-    if (filters?.project_id) {
-      query = query.eq("project_id", filters.project_id);
-    }
-    if (filters?.payment_status) {
+    if (filters?.status) query = query.eq("status", filters.status);
+    if (filters?.priority) query = query.eq("priority", filters.priority);
+    if (filters?.assigned_to) query = query.eq("assigned_to", filters.assigned_to);
+    if (filters?.project_id) query = query.eq("project_id", filters.project_id);
+    if (filters?.payment_status)
       query = query.eq("payment_status", filters.payment_status);
-    }
+    if (filters?.q) query = query.ilike("title", `%${filters.q}%`);
 
     const { data, error } = await query;
 
     if (error) {
+      console.error("[getTasks]", error);
       return { success: false, error: "Failed to load tasks" };
     }
 
-    let tasks = data as TaskWithRelations[];
+    let tasks = ((data ?? []) as unknown as TaskRow[]).map(toListItem);
 
-    // Filter by client_id (since it's nested)
-    if (filters?.client_id) {
+    // Label filter (post-query since the join is nested)
+    if (filters?.label_id) {
+      tasks = tasks.filter((t) => t.labels.some((l) => l.id === filters.label_id));
+    }
+
+    // Overdue filter
+    if (filters?.status === "OVERDUE") {
+      const now = Date.now();
       tasks = tasks.filter(
-        (t) => (t.project as unknown as { client_id?: string })?.client_id === filters.client_id
+        (t) => t.deadline && new Date(t.deadline).getTime() < now && t.status !== "COMPLETED"
       );
     }
 
@@ -70,58 +143,113 @@ export async function getTasks(filters?: {
   }
 }
 
-export async function getTask(
-  id: string
-): Promise<ActionResponse<TaskWithRelations>> {
+export interface TaskDetail extends TaskListItem {
+  description: string | null;
+  comments: Array<{
+    id: string;
+    task_id: string;
+    user_id: string;
+    comment: string;
+    created_at: string;
+    user: { id: string; full_name: string; avatar_url: string | null };
+  }>;
+  attachments: Array<{
+    id: string;
+    file_name: string;
+    file_path: string;
+    file_size: number | null;
+    mime_type: string | null;
+    uploaded_by: string;
+    created_at: string;
+  }>;
+  resources: Array<{
+    id: string;
+    title: string;
+    url: string;
+    description: string | null;
+    resource_type: string;
+  }>;
+  labels: Array<{ id: string; name: string; color: string }>;
+  subtasks: Array<{
+    id: string;
+    task_id: string;
+    title: string;
+    done: boolean;
+    position: number;
+    created_at: string;
+  }>;
+}
+
+export async function getTask(id: string): Promise<ActionResponse<TaskDetail>> {
   try {
     const profile = await requireAuth();
     const supabase = await createClient();
 
     const { data, error } = await supabase
       .from("tasks")
-      .select("*, project:projects(*, client:clients(*)), assigned_user:profiles!tasks_assigned_to_fkey(*)")
+      .select(TASK_SELECT + ", description")
       .eq("id", id)
       .single();
 
-    if (error) {
+    if (error || !data) {
       return { success: false, error: "Task not found" };
     }
 
-    // Check access
+    const row = data as unknown as TaskRow & { description: string | null };
+
+    // Check access for employees
     if (profile.role === "EMPLOYEE") {
-      if (data.assigned_to !== profile.id) {
-        const hasAccess = await hasProjectAccess(
-          data.project_id,
-          profile.id,
-          profile.role
-        );
-        if (!hasAccess) {
-          return { success: false, error: "Access denied" };
-        }
+      const isAssignee = row.assigned_user?.id === profile.id;
+      const hasAccess =
+        isAssignee ||
+        (await hasProjectAccess(row.project?.id ?? "", profile.id, profile.role));
+      if (!hasAccess) {
+        return { success: false, error: "You don't have access to this task" };
       }
     }
 
-    // Fetch comments
-    const { data: comments } = await supabase
-      .from("task_comments")
-      .select("*, user:profiles(id, full_name, avatar_url)")
-      .eq("task_id", id)
-      .order("created_at");
+    // Fetch comments, attachments and project resources in parallel
+    const [commentsRes, attachmentsRes, resourcesRes, labelsRes, subtasksRes] = await Promise.all([
+      supabase
+        .from("task_labels")
+        .select("label:labels(id, name, color)")
+        .eq("task_id", id),
+      supabase
+        .from("task_subtasks")
+        .select("*")
+        .eq("task_id", id)
+        .order("position", { ascending: true }),
+      supabase
+        .from("task_comments")
+        .select("*, user:profiles(id, full_name, avatar_url)")
+        .eq("task_id", id)
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("task_attachments")
+        .select("*")
+        .eq("task_id", id)
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("project_resources")
+        .select("id, title, url, description, resource_type")
+        .eq("project_id", row.project?.id ?? "")
+        .order("created_at", { ascending: true }),
+    ]);
 
-    // Fetch attachments
-    const { data: attachments } = await supabase
-      .from("task_attachments")
-      .select("*")
-      .eq("task_id", id)
-      .order("created_at");
+    const labelRows = (labelsRes.data ?? []) as Array<{
+      label: { id: string; name: string; color: string } | null;
+    }>;
 
     const task = {
-      ...data,
-      comments: comments || [],
-      attachments: attachments || [],
-    } as TaskWithRelations & {
-      comments: Array<{ id: string; comment: string; created_at: string; user: { id: string; full_name: string; avatar_url: string | null } }>;
-      attachments: Array<{ id: string; file_name: string; file_path: string; mime_type: string | null; created_at: string }>;
+      ...toListItem(row),
+      description: row.description ?? null,
+      comments: (commentsRes.data ?? []) as unknown as TaskDetail["comments"],
+      attachments: (attachmentsRes.data ?? []) as unknown as TaskDetail["attachments"],
+      resources: (resourcesRes.data ?? []) as unknown as TaskDetail["resources"],
+      labels: labelRows
+        .map((l) => l.label)
+        .filter((l): l is { id: string; name: string; color: string } => !!l),
+      subtasks: (subtasksRes.data ?? []) as unknown as TaskDetail["subtasks"],
     };
 
     return { success: true, data: task };
@@ -129,6 +257,10 @@ export async function getTask(
     return { success: false, error: "Unauthorized" };
   }
 }
+
+// ──────────────────────────────────────────────
+// Mutations
+// ──────────────────────────────────────────────
 
 export async function createTaskAction(
   input: TaskInput
@@ -138,7 +270,7 @@ export async function createTaskAction(
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: "Invalid input" };
+      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
     }
 
     const supabase = await createClient();
@@ -153,29 +285,75 @@ export async function createTaskAction(
         priority: validated.data.priority || "MEDIUM",
         deadline: validated.data.deadline || null,
         payout_amount: validated.data.payout_amount || 0,
-        payment_status: validated.data.payment_status || "NOT_APPLICABLE",
+        payment_status:
+          (validated.data.payout_amount ?? 0) > 0 ? "PENDING" : "NOT_APPLICABLE",
         created_by: profile.id,
       })
       .select()
       .single();
 
     if (error) {
+      console.error("[createTaskAction]", error);
       return { success: false, error: "Failed to create task" };
     }
 
-    // Create notification if assigned
-    if (validated.data.assigned_to) {
-      await supabase.from("notifications").insert({
-        user_id: validated.data.assigned_to,
-        type: "TASK_ASSIGNED",
-        title: "New task assigned",
-        message: `You've been assigned: ${validated.data.title}`,
-        reference_type: "task",
-        reference_id: data.id,
-      });
+    const task = data as Task;
+
+    // Attach labels
+    if (validated.data.label_ids && validated.data.label_ids.length > 0) {
+      await supabase.from("task_labels").insert(
+        validated.data.label_ids.map((labelId) => ({ task_id: task.id, label_id: labelId }))
+      );
     }
 
-    return { success: true, data: data as Task };
+    // Create subtasks (§21)
+    if (validated.data.subtasks && validated.data.subtasks.length > 0) {
+      await supabase.from("task_subtasks").insert(
+        validated.data.subtasks.map((s, i) => ({
+          task_id: task.id,
+          title: s.title,
+          position: i,
+        }))
+      );
+    }
+
+    // Notify + email the assignee
+    if (task.assigned_to) {
+      const { data: proj } = await supabase
+        .from("projects")
+        .select("name, client:clients(name)")
+        .eq("id", task.project_id)
+        .single();
+      const { data: assignee } = await supabase
+        .from("profiles")
+        .select("full_name, email")
+        .eq("id", task.assigned_to)
+        .single();
+
+      await createNotification({
+        userId: task.assigned_to,
+        type: "TASK_ASSIGNED",
+        title: "New task assigned",
+        message: `${task.title}`,
+        referenceType: "task",
+        referenceId: task.id,
+      });
+
+      if (assignee?.email) {
+        await sendEventEmail("TASK_ASSIGNED", {
+          to: assignee.email,
+          employeeName: assignee.full_name,
+          taskTitle: task.title,
+          projectName: proj?.name ?? "",
+          clientName:
+            (proj?.client as unknown as { name?: string }[] | null)?.[0]?.name ?? "",
+          deadline: task.deadline,
+          payoutAmount: Number(task.payout_amount),
+        });
+      }
+    }
+
+    return { success: true, data: task };
   } catch {
     return { success: false, error: "Unauthorized" };
   }
@@ -190,7 +368,7 @@ export async function updateTaskAction(
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: "Invalid input" };
+      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
     }
 
     const supabase = await createClient();
@@ -201,7 +379,6 @@ export async function updateTaskAction(
         assigned_to: validated.data.assigned_to || null,
         title: validated.data.title,
         description: validated.data.description || null,
-        status: validated.data.status || "TODO",
         priority: validated.data.priority || "MEDIUM",
         deadline: validated.data.deadline || null,
         payout_amount: validated.data.payout_amount || 0,
@@ -212,47 +389,69 @@ export async function updateTaskAction(
       .single();
 
     if (error) {
+      console.error("[updateTaskAction]", error);
       return { success: false, error: "Failed to update task" };
     }
 
-    return { success: true, data: data as Task };
+    const task = data as Task;
+
+    // Notify reassignment
+    if (task.assigned_to) {
+      const { data: prev } = await supabase
+        .from("tasks")
+        .select("assigned_to")
+        .eq("id", id)
+        .single();
+      // Only notify if this is a fresh assignment
+      if (prev && prev.assigned_to !== task.assigned_to) {
+        await createNotification({
+          userId: task.assigned_to,
+          type: "TASK_ASSIGNED",
+          title: "New task assigned",
+          message: `${task.title}`,
+          referenceType: "task",
+          referenceId: task.id,
+        });
+      }
+    }
+
+    return { success: true, data: task };
   } catch {
     return { success: false, error: "Unauthorized" };
   }
 }
 
-export async function deleteTaskAction(
-  id: string
-): Promise<ActionResponse> {
+export async function deleteTaskAction(id: string): Promise<ActionResponse> {
   try {
     await requireAdmin();
-
     const supabase = await createClient();
     const { error } = await supabase.from("tasks").delete().eq("id", id);
-
     if (error) {
+      console.error("[deleteTaskAction]", error);
       return { success: false, error: "Failed to delete task" };
     }
-
     return { success: true };
   } catch {
     return { success: false, error: "Unauthorized" };
   }
 }
 
+// ──────────────────────────────────────────────
+// Status transitions (§28) — enforced here AND in the DB trigger
+// ──────────────────────────────────────────────
+
 export async function updateTaskStatus(
   taskId: string,
-  status: Task["status"],
+  status: TaskStatus,
   comment?: string
 ): Promise<ActionResponse<Task>> {
   try {
     const profile = await requireAuth();
     const supabase = await createClient();
 
-    // Get current task
     const { data: currentTask } = await supabase
       .from("tasks")
-      .select("*, project:projects(*)")
+      .select("id, title, status, assigned_to")
       .eq("id", taskId)
       .single();
 
@@ -260,19 +459,51 @@ export async function updateTaskStatus(
       return { success: false, error: "Task not found" };
     }
 
-    // Employees can only submit (IN_PROGRESS → SUBMITTED)
-    if (profile.role === "EMPLOYEE") {
-      if (status !== "SUBMITTED" || currentTask.assigned_to !== profile.id) {
-        return { success: false, error: "Unauthorized status change" };
+    const isAdmin = profile.role === "ADMIN";
+    const isAssignee = currentTask.assigned_to === profile.id;
+
+    if (isAdmin) {
+      // Admin rules: SUBMITTED → COMPLETED or REVISION_REQUIRED.
+      // Also allowed: move any task back to TODO / IN_PROGRESS.
+      const allowed =
+        (currentTask.status === "SUBMITTED" &&
+          (status === "COMPLETED" || status === "REVISION_REQUIRED")) ||
+        (status === "TODO" || status === "IN_PROGRESS" || status === "COMPLETED");
+      if (!allowed) {
+        return { success: false, error: "Not an allowed transition" };
+      }
+    } else {
+      // Employee rules: must be the assignee.
+      if (!isAssignee) {
+        return { success: false, error: "You can only update your own tasks" };
+      }
+      const allowed =
+        (currentTask.status === "TODO" && status === "IN_PROGRESS") ||
+        (currentTask.status === "IN_PROGRESS" && status === "SUBMITTED") ||
+        (currentTask.status === "REVISION_REQUIRED" && status === "IN_PROGRESS") ||
+        (currentTask.status === "REVISION_REQUIRED" && status === "SUBMITTED");
+      if (!allowed) {
+        return { success: false, error: "Not an allowed transition" };
       }
     }
 
     const updateData: Record<string, unknown> = { status };
-
-    // Set completed_at when marking as completed
     if (status === "COMPLETED") {
       updateData.completed_at = new Date().toISOString();
-      updateData.payment_status = "PENDING";
+
+      // Mark payable on completion if it has a payout and is not yet paid
+      const { data: pay } = await supabase
+        .from("tasks")
+        .select("payout_amount, payment_status")
+        .eq("id", taskId)
+        .single();
+      if (
+        pay &&
+        Number(pay.payout_amount) > 0 &&
+        pay.payment_status === "NOT_APPLICABLE"
+      ) {
+        updateData.payment_status = "PENDING";
+      }
     }
 
     const { data, error } = await supabase
@@ -283,58 +514,18 @@ export async function updateTaskStatus(
       .single();
 
     if (error) {
-      return { success: false, error: "Failed to update task status" };
+      console.error("[updateTaskStatus]", error);
+      const msg = error.message.includes("allowed status transition")
+        ? "That status change isn't allowed"
+        : error.message.includes("Not allowed to modify")
+          ? "You can only update your own tasks"
+          : "Failed to update task";
+      return { success: false, error: msg };
     }
 
-    // Create notifications based on status change
-    const notifications: Array<{
-      user_id: string;
-      type: Notification["type"];
-      title: string;
-      message: string;
-      reference_type: string;
-      reference_id: string;
-    }> = [];
+    const task = data as Task;
 
-    if (status === "SUBMITTED" && currentTask.assigned_to) {
-      // Notify admin
-      const { data: admins } = await supabase
-        .from("profiles")
-        .select("id")
-        .eq("role", "ADMIN");
-
-      admins?.forEach((admin) => {
-        notifications.push({
-          user_id: admin.id,
-          type: "TASK_SUBMITTED",
-          title: "Task submitted",
-          message: `Task "${currentTask.title}" submitted for review`,
-          reference_type: "task",
-          reference_id: taskId,
-        });
-      });
-    } else if (
-      (status === "APPROVED" || status === "REVISION_REQUIRED") &&
-      currentTask.assigned_to
-    ) {
-      notifications.push({
-        user_id: currentTask.assigned_to,
-        type: status === "APPROVED" ? "TASK_APPROVED" : "REVISION_REQUESTED",
-        title: status === "APPROVED" ? "Task approved" : "Revision requested",
-        message:
-          status === "APPROVED"
-            ? `Your task "${currentTask.title}" has been approved!`
-            : `Your task "${currentTask.title}" needs revision.${comment ? ` Note: ${comment}` : ""}`,
-        reference_type: "task",
-        reference_id: taskId,
-      });
-    }
-
-    if (notifications.length > 0) {
-      await supabase.from("notifications").insert(notifications);
-    }
-
-    // Add comment if provided
+    // Add review comment if provided (revision note)
     if (comment) {
       await supabase.from("task_comments").insert({
         task_id: taskId,
@@ -343,15 +534,215 @@ export async function updateTaskStatus(
       });
     }
 
-    return { success: true, data: data as Task };
+    // ── Notifications ──
+    if (status === "SUBMITTED" && currentTask.assigned_to) {
+      const { data: admins } = await supabase
+        .from("profiles")
+        .select("id")
+        .eq("role", "ADMIN")
+        .eq("active", true);
+
+      const inputs = (admins ?? [])
+        .filter((a) => a.id !== profile.id)
+        .map((a) => ({
+          userId: a.id,
+          type: "TASK_SUBMITTED" as const,
+          title: "Task submitted",
+          message: `${profile.full_name} submitted "${currentTask.title}"`,
+          referenceType: "task",
+          referenceId: taskId,
+        }));
+      await createNotifications(inputs);
+    } else if (status === "COMPLETED" && currentTask.assigned_to) {
+      await createNotification({
+        userId: currentTask.assigned_to,
+        type: "TASK_APPROVED",
+        title: "Task approved",
+        message: `Your task "${currentTask.title}" has been approved`,
+        referenceType: "task",
+        referenceId: taskId,
+      });
+
+      const { data: assignee } = await supabase
+        .from("profiles")
+        .select("email, full_name")
+        .eq("id", currentTask.assigned_to)
+        .single();
+      if (assignee?.email) {
+        await sendEventEmail("TASK_APPROVED", {
+          to: assignee.email,
+          employeeName: assignee.full_name,
+          taskTitle: currentTask.title,
+        });
+      }
+    } else if (status === "REVISION_REQUIRED" && currentTask.assigned_to) {
+      await createNotification({
+        userId: currentTask.assigned_to,
+        type: "REVISION_REQUESTED",
+        title: "Revision requested",
+        message: comment
+          ? `${currentTask.title} — ${comment}`
+          : `${currentTask.title}`,
+        referenceType: "task",
+        referenceId: taskId,
+      });
+
+      const { data: assignee } = await supabase
+        .from("profiles")
+        .select("email, full_name")
+        .eq("id", currentTask.assigned_to)
+        .single();
+      if (assignee?.email) {
+        await sendEventEmail("REVISION_REQUESTED", {
+          to: assignee.email,
+          employeeName: assignee.full_name,
+          taskTitle: currentTask.title,
+          revisionComment: comment,
+        });
+      }
+    }
+
+    return { success: true, data: task };
   } catch {
     return { success: false, error: "Unauthorized" };
   }
 }
 
-/**
- * Get projects for task form dropdown.
- */
+// ──────────────────────────────────────────────
+// Attachments — real uploads via storage
+// ──────────────────────────────────────────────
+
+export async function uploadTaskAttachment(
+  taskId: string,
+  file: File
+): Promise<
+  ActionResponse<{ id: string; file_name: string; file_path: string }>
+> {
+  try {
+    const profile = await requireAuth();
+    const supabase = await createClient();
+
+    const { data: task } = await supabase
+      .from("tasks")
+      .select("id, assigned_to, project_id")
+      .eq("id", taskId)
+      .single();
+    if (!task) return { success: false, error: "Task not found" };
+
+    if (
+      profile.role === "EMPLOYEE" &&
+      task.assigned_to !== profile.id &&
+      !(await hasProjectAccess(task.project_id, profile.id, profile.role))
+    ) {
+      return { success: false, error: "You don't have access to this task" };
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      return { success: false, error: "File is too large (max 50MB)" };
+    }
+    if (file.type && !ALLOWED_FILE_TYPES.includes(file.type)) {
+      return { success: false, error: "This file type isn't allowed" };
+    }
+
+    const ext = file.name.includes(".")
+      ? file.name.split(".").pop()!.toLowerCase()
+      : "bin";
+    const path = `${taskId}/${crypto.randomUUID()}.${ext}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("attachments")
+      .upload(path, file, {
+        contentType: file.type || "application/octet-stream",
+        upsert: false,
+      });
+
+    if (uploadError) {
+      console.error("[uploadTaskAttachment] storage:", uploadError);
+      return { success: false, error: "Failed to upload file" };
+    }
+
+    const { data, error } = await supabase
+      .from("task_attachments")
+      .insert({
+        task_id: taskId,
+        uploaded_by: profile.id,
+        file_name: file.name,
+        file_path: path,
+        file_size: file.size,
+        mime_type: file.type || null,
+      })
+      .select("id, file_name, file_path")
+      .single();
+
+    if (error) {
+      // Roll back the storage object if the row insert fails
+      await supabase.storage.from("attachments").remove([path]);
+      console.error("[uploadTaskAttachment] row:", error);
+      return { success: false, error: "Failed to save attachment" };
+    }
+
+    return { success: true, data };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+export async function getAttachmentUrl(
+  filePath: string
+): Promise<ActionResponse<{ url: string }>> {
+  try {
+    await requireAuth();
+    const supabase = await createClient();
+    const { data, error } = await supabase.storage
+      .from("attachments")
+      .createSignedUrl(filePath, 60 * 10); // 10 minutes
+
+    if (error || !data) {
+      return { success: false, error: "Failed to open file" };
+    }
+    return { success: true, data: { url: data.signedUrl } };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+export async function deleteTaskAttachment(
+  attachmentId: string
+): Promise<ActionResponse> {
+  try {
+    const profile = await requireAuth();
+    const supabase = await createClient();
+
+    const { data: att } = await supabase
+      .from("task_attachments")
+      .select("id, file_path, uploaded_by")
+      .eq("id", attachmentId)
+      .single();
+    if (!att) return { success: false, error: "Attachment not found" };
+
+    if (profile.role !== "ADMIN" && att.uploaded_by !== profile.id) {
+      return { success: false, error: "You can only delete your own files" };
+    }
+
+    await supabase.storage.from("attachments").remove([att.file_path]);
+    const { error } = await supabase
+      .from("task_attachments")
+      .delete()
+      .eq("id", attachmentId);
+
+    if (error) {
+      return { success: false, error: "Failed to delete file" };
+    }
+    return { success: true };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+// ──────────────────────────────────────────────
+// Dropdown helpers
+// ──────────────────────────────────────────────
+
 export async function getProjectsForTask(): Promise<
   ActionResponse<Array<{ id: string; name: string; client_name: string }>>
 > {
@@ -359,10 +750,7 @@ export async function getProjectsForTask(): Promise<
     const profile = await requireAuth();
     const supabase = await createClient();
 
-    let query = supabase
-      .from("projects")
-      .select("id, name, client:clients(name)")
-      .order("name");
+    let query = supabase.from("projects").select("id, name, client:clients(name)").order("name");
 
     if (profile.role === "EMPLOYEE") {
       const { data: memberProjects } = await supabase
@@ -376,16 +764,15 @@ export async function getProjectsForTask(): Promise<
     }
 
     const { data, error } = await query;
-
     if (error) {
       return { success: false, error: "Failed to load projects" };
     }
 
-    const projects = (data || []).map(
+    const projects = (data ?? []).map(
       (p: { id: string; name: string; client: { name: string }[] | null }) => ({
         id: p.id,
         name: p.name,
-        client_name: p.client?.[0]?.name || "",
+        client_name: p.client?.[0]?.name ?? "",
       })
     );
 
