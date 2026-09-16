@@ -127,24 +127,71 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000)
 
+## Account Model & Security
+
+Taskora separates **role** (`ADMIN` / `EMPLOYEE`) from **status**
+(`PENDING` / `ACTIVE` / `SUSPENDED`).
+
+- **Every new signup — including Google OAuth — starts as
+  `role = NULL, status = PENDING` with no application access.**
+  There is no automatic admin promotion of any kind.
+- Pending and suspended users are blocked server-side at three layers:
+  the Next.js proxy (`proxy.ts`), every server action
+  (`requireActiveUser/Employee/Admin` in `lib/auth.ts`), and Supabase
+  RLS (migrations 005–008).
+- Only an **active admin** can approve accounts, change roles, or
+  suspend users — and the last active admin cannot be demoted or
+  suspended (enforced by the `manage_profile_lifecycle` RPC).
+
 ## Creating the First Admin
 
-1. Open the app and go to `/signup`
-2. Create an account — the **first user automatically becomes ADMIN**
-3. Sign in with your credentials
+The first admin must be created **explicitly** — never by login order:
 
-All subsequent signups will be **EMPLOYEE** role by default.
+1. Open the app and sign in once with your Google account
+2. In Supabase (SQL Editor), promote that exact account:
 
-## Creating Employees
+```sql
+UPDATE profiles
+SET role = 'ADMIN', status = 'ACTIVE', active = true,
+    approved_at = now()
+WHERE email = 'you@youragency.com';
+```
 
-**Option A: Via Signup**
-- Share the `/signup` URL with employees
-- They create their own accounts (as employees)
+3. Sign out and back in — you'll land on the admin workspace.
 
-**Option B: Via Supabase Dashboard**
-1. Go to Authentication → Users
-2. Create a new user
-3. The profile will be auto-created via the database trigger
+## Adding Employees (Invitations)
+
+1. **Team → Pending → “Invite employee”**
+2. Enter their email and role; they receive a link (or share the
+   shown link manually)
+3. They open the link and sign in with the Google account for that
+   exact email address — the account activates with the invited role
+
+Alternatively, uninvited people can sign in on their own — they'll
+land on the **pending** page until an admin approves them from the
+Team page.
+
+### Legacy email/password users signing in with Google
+
+In Supabase → Authentication → Providers → Google, enable
+**“Link Google account to existing user by email”** (or
+“Automatic linking” depending on dashboard version). Existing
+employees then keep the same profile, tasks, payments, and history
+when they first use Google sign-in. Without it, Google sign-in for an
+email that already exists is rejected with a clear message.
+
+## Push Notifications (optional)
+
+Real system notifications (PWA Web Push) need VAPID keys:
+
+```bash
+npx web-push generate-vapid-keys
+```
+
+Set `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and
+`VAPID_SUBJECT` (see `.env.local.example`). Users opt in from the
+notification center via “Enable notifications”. Without keys, the
+in-app notification center still works; browser push is skipped.
 
 ## Deployment (Vercel)
 

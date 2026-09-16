@@ -5,18 +5,22 @@ import { requireAdmin } from "@/lib/auth";
 import { clientSchema, type ClientInput } from "@/validators/schemas";
 import type { ActionResponse, Client } from "@/types/database";
 
-export async function getClients(): Promise<
+export async function getClients(
+  options?: { archived?: boolean }
+): Promise<
   ActionResponse<Array<Client & { projects_count: number }>>
 > {
   try {
     await requireAdmin();
 
     const supabase = await createClient();
-    const { data, error } = await supabase
-      .from("clients")
-      .select("*")
-      .order("name");
+    // §43 — Active and Archived are separate views
+    let query = supabase.from("clients").select("*").order("name");
+    query = options?.archived
+      ? query.eq("active", false)
+      : query.eq("active", true);
 
+    const { data, error } = await query;
     if (error) {
       console.error("[getClients]", error);
       return { success: false, error: "Failed to load clients" };
@@ -200,6 +204,57 @@ export async function archiveClientAction(id: string): Promise<ActionResponse> {
       detail: id,
     });
     if (auditError) return { success: false, error: "Client archived, but audit logging failed" };
+    return { success: true };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/** §47 — restore returns the client to the active list */
+export async function restoreClientAction(id: string): Promise<ActionResponse> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("clients")
+      .update({ active: true })
+      .eq("id", id);
+    if (error) {
+      console.error("[restoreClientAction]", error);
+      return { success: false, error: "Failed to restore client" };
+    }
+    return { success: true };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/** Permanent delete — only when the client has no projects left */
+export async function deleteClientAction(id: string): Promise<ActionResponse> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+
+    const { count: projectCount } = await supabase
+      .from("projects")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", id);
+
+    if ((projectCount ?? 0) > 0) {
+      return {
+        success: false,
+        error: `This client still has ${projectCount} project${projectCount === 1 ? "" : "s"}. Delete or reassign those first.`,
+      };
+    }
+
+    const { error } = await supabase.from("clients").delete().eq("id", id);
+    if (error) {
+      console.error("[deleteClientAction]", error);
+      return {
+        success: false,
+        error: "Couldn't delete the client. It may have related records that need to be handled first.",
+      };
+    }
     return { success: true };
   } catch {
     return { success: false, error: "Unauthorized" };

@@ -1,6 +1,17 @@
 import { z } from "zod";
 
 // ──────────────────────────────────────────────
+// Invitation Schemas (§9)
+// ──────────────────────────────────────────────
+
+export const invitationSchema = z.object({
+  email: z.string().email("Please enter a valid email address"),
+  role: z.enum(["EMPLOYEE", "ADMIN"]).default("EMPLOYEE"),
+});
+
+export type InvitationInput = z.infer<typeof invitationSchema>;
+
+// ──────────────────────────────────────────────
 // Profile Schemas
 // ──────────────────────────────────────────────
 

@@ -11,7 +11,9 @@ import type {
   ProjectResource,
 } from "@/types/database";
 
-export async function getProjects(): Promise<
+export async function getProjects(
+  options?: { archived?: boolean }
+): Promise<
   ActionResponse<
     Array<
       Project & {
@@ -25,11 +27,17 @@ export async function getProjects(): Promise<
     const profile = await requireAuth();
     const supabase = await createClient();
 
+    // §41 — Active and Archived are separate views, never mixed.
     let query = supabase
       .from("projects")
       .select("*, client:clients(name)")
-      .neq("status", "ARCHIVED")
       .order("created_at", { ascending: false });
+
+    if (options?.archived) {
+      query = query.eq("status", "ARCHIVED");
+    } else {
+      query = query.neq("status", "ARCHIVED");
+    }
 
     if (profile.role === "EMPLOYEE") {
       const { data: memberProjects } = await supabase
@@ -301,6 +309,60 @@ export async function archiveProjectAction(id: string): Promise<ActionResponse> 
       detail: id,
     });
     if (auditError) return { success: false, error: "Project archived, but audit logging failed" };
+    return { success: true };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/** §47 — restore brings the project back to ACTIVE */
+export async function restoreProjectAction(id: string): Promise<ActionResponse> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+    const { error } = await supabase
+      .from("projects")
+      .update({ status: "ACTIVE" })
+      .eq("id", id);
+    if (error) {
+      console.error("[restoreProjectAction]", error);
+      return { success: false, error: "Failed to restore project" };
+    }
+    return { success: true };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/**
+ * Permanent delete (§46) — only allowed when nothing references the
+ * project, so agency history is never silently destroyed.
+ */
+export async function deleteProjectAction(id: string): Promise<ActionResponse> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+
+    const { count: taskCount } = await supabase
+      .from("tasks")
+      .select("id", { count: "exact", head: true })
+      .eq("project_id", id);
+
+    if ((taskCount ?? 0) > 0) {
+      return {
+        success: false,
+        error: `This project still has ${taskCount} task${taskCount === 1 ? "" : "s"}. Delete those first, or keep the project archived.`,
+      };
+    }
+
+    const { error } = await supabase.from("projects").delete().eq("id", id);
+    if (error) {
+      console.error("[deleteProjectAction]", error);
+      return {
+        success: false,
+        error: "Couldn't delete the project. It may have related records that need to be handled first.",
+      };
+    }
     return { success: true };
   } catch {
     return { success: false, error: "Unauthorized" };

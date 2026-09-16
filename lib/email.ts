@@ -82,6 +82,34 @@ function baseTemplate(title: string, content: string): string {
 // Notification Emails (important events only)
 // ──────────────────────────────────────────────
 
+export async function sendInvitationEmail(
+  to: string,
+  invitedByName: string,
+  role: "ADMIN" | "EMPLOYEE",
+  inviteUrl: string
+) {
+  const safeInviter = escapeHtml(invitedByName);
+  const roleLabel = role === "ADMIN" ? "an administrator" : "a team member";
+
+  const content = `
+    <p>Hi,</p>
+    <p>${safeInviter} has invited you to join <strong>Taskora</strong> as ${roleLabel}.</p>
+    <p>Click the button below and sign in with the Google account for this email address to accept the invitation.</p>
+    <p>
+      <a href="${inviteUrl}" style="display:inline-block;background:#171717;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:500;">
+        Accept invitation
+      </a>
+    </p>
+    <p style="color:#737373;font-size:12px;">If the button doesn't work, paste this link into your browser:<br>${inviteUrl}</p>
+  `;
+
+  return sendEmail({
+    to,
+    subject: "You've been invited to Taskora",
+    html: baseTemplate("Join Taskora", content),
+  });
+}
+
 export async function sendTaskAssignedEmail(
   to: string,
   employeeName: string,

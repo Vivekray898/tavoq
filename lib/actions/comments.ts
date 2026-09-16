@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAuth } from "@/lib/auth";
+import { requireActiveUser } from "@/lib/auth";
 import { createNotification } from "@/lib/notifications";
 import { commentSchema } from "@/validators/schemas";
 import type { ActionResponse, TaskComment } from "@/types/database";
@@ -11,7 +11,7 @@ export async function addCommentAction(
   rawComment: string
 ): Promise<ActionResponse<TaskComment & { user: { id: string; full_name: string; avatar_url: string | null } }>> {
   try {
-    const profile = await requireAuth();
+    const profile = await requireActiveUser();
     const supabase = await createClient();
 
     const validated = commentSchema.safeParse({ comment: rawComment });
@@ -72,7 +72,7 @@ export async function addCommentAction(
         .from("profiles")
         .select("id")
         .eq("role", "ADMIN")
-        .eq("active", true);
+        .eq("status", "ACTIVE");
       (admins ?? []).forEach((a) => recipientIds.add(a.id));
     }
     recipientIds.delete(profile.id);

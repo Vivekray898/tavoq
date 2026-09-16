@@ -1,5 +1,6 @@
 import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { sendPushToUser } from "@/lib/push";
 import {
   sendTaskAssignedEmail,
   sendRevisionRequestedEmail,
@@ -52,6 +53,21 @@ export async function createNotification(input: CreateNotificationInput) {
     console.error("[createNotification] insert failed:", error);
     return { success: false as const, error: error.message };
   }
+
+  // §20 — deliver as a real browser/system notification too
+  // (fire-and-forget; requires VAPID keys to be configured).
+  void sendPushToUser(input.userId, {
+    title: input.title,
+    body: input.message,
+    url:
+      input.referenceType === "task" && input.referenceId
+        ? `/tasks/${input.referenceId}`
+        : input.referenceType === "project" && input.referenceId
+          ? `/projects/${input.referenceId}`
+          : "/notifications",
+    tag: input.type,
+  });
+
   return { success: true as const };
 }
 

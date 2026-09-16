@@ -8,7 +8,6 @@ import {
   Bell,
   Settings,
   User,
-  Search,
   MoreHorizontal,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -55,12 +54,14 @@ export const ADMIN_NAV: NavSection[] = [
   },
 ];
 
+// §24/§25 — employees don't manage projects (project context lives
+// inside their tasks); they get their Payments instead.
 export const EMPLOYEE_NAV: NavSection[] = [
   { items: [{ label: "Home", href: "/", icon: LayoutDashboard }] },
   {
     items: [
       { label: "My Tasks", href: "/tasks", icon: CheckSquare },
-      { label: "Projects", href: "/projects", icon: FolderKanban },
+      { label: "Payments", href: "/payments", icon: IndianRupee },
     ],
   },
   {
@@ -84,13 +85,14 @@ export const ADMIN_MOBILE_NAV: NavItem[] = [
 export const EMPLOYEE_MOBILE_NAV: NavItem[] = [
   { label: "Home", href: "/", icon: LayoutDashboard },
   { label: "Tasks", href: "/tasks", icon: CheckSquare },
-  { label: "Projects", href: "/projects", icon: FolderKanban },
+  { label: "Payments", href: "/payments", icon: IndianRupee },
   { label: "Notifications", href: "/notifications", icon: Bell, badge: "notifications" },
 ];
 
-/** Secondary destinations inside the admin "More" sheet */
+/** Secondary destinations inside the admin "More" sheet.
+ *  Note: no /search route exists — desktop/mobile search is the
+ *  ⌘K SearchDialog in the topbar, so it's intentionally absent here. */
 export const ADMIN_MORE_ITEMS: NavItem[] = [
-  { label: "Search", href: "/search", icon: Search },
   { label: "Clients", href: "/clients", icon: Building2 },
   { label: "Team", href: "/employees", icon: Users },
   { label: "Payments", href: "/payments", icon: IndianRupee },
@@ -101,7 +103,6 @@ export const ADMIN_MORE_ITEMS: NavItem[] = [
 
 /** Employee "More" fallback (only used if notifications not shown) */
 export const EMPLOYEE_MORE_ITEMS: NavItem[] = [
-  { label: "Search", href: "/search", icon: Search },
   { label: "Profile", href: "/profile", icon: User },
 ];
 

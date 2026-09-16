@@ -77,7 +77,8 @@ export type NotificationType =
   | "TASK_APPROVED"
   | "PAYMENT_PAID"
   | "COMMENT_ADDED"
-  | "PROJECT_ASSIGNED";
+  | "PROJECT_ASSIGNED"
+  | "ACCOUNT_PENDING";
 
 export type DevicePlatform = "ANDROID" | "IOS";
 

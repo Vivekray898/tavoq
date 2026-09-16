@@ -26,6 +26,51 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// ──────────────────────────────────────────────
+// Web Push (§20) — real system notifications even when the app is
+// closed. Payload: { title, body, url, tag }.
+// ──────────────────────────────────────────────
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { title: "Taskora", body: event.data ? event.data.text() : "" };
+  }
+
+  const title = data.title || "Taskora";
+  const options = {
+    body: data.body || "",
+    tag: data.tag || undefined,
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
+    data: { url: data.url || "/notifications" },
+    vibrate: [80, 40, 80],
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Click → focus the app on the relevant screen (§69)
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = event.notification.data?.url || "/notifications";
+  const url = new URL(target, self.location.origin).href;
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      // Focus an existing window if we have one
+      for (const client of clientList) {
+        if (client.url.startsWith(self.location.origin) && "focus" in client) {
+          client.navigate(url).catch(() => {});
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(url);
+    })
+  );
+});
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;

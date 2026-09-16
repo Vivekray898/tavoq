@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/shared/empty-state";
+import { PushPermissionCard } from "@/components/notifications/push-permission-card";
 import { useNotifications } from "@/components/providers/notifications-provider";
 import { getRelativeTime, cn } from "@/lib/utils";
 import type { NotificationType } from "@/types/database";
@@ -28,11 +29,13 @@ const TYPE_ICONS: Record<NotificationType, typeof Bell> = {
   PAYMENT_PAID: IndianRupee,
   COMMENT_ADDED: MessageSquare,
   PROJECT_ASSIGNED: CheckSquare,
+  ACCOUNT_PENDING: AlertTriangle,
 };
 
 function hrefFor(n: { reference_type: string | null; reference_id: string | null }): string {
   if (n.reference_type === "task" && n.reference_id) return `/tasks/${n.reference_id}`;
   if (n.reference_type === "project" && n.reference_id) return `/projects/${n.reference_id}`;
+  if (n.reference_type === "payment" && n.reference_id) return "/payments";
   return "/notifications";
 }
 
@@ -84,6 +87,9 @@ export default function NotificationsPage() {
           </Button>
         )}
       </div>
+
+      {/* §19 — browser/system notification opt-in (once per user) */}
+      <PushPermissionCard />
 
       {notifications.length === 0 ? (
         <EmptyState

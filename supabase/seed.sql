@@ -8,14 +8,26 @@
 -- 3. Run: supabase/migrations/003_status_simplify.sql
 -- 4. Run: supabase/migrations/004_task_management_upgrades.sql
 --    (labels, subtasks, saved filters, activity stream, task ordering)
--- 4. Create auth users (Supabase Dashboard → Authentication),
---    then promote one to admin:
---        UPDATE profiles SET role = 'ADMIN' WHERE email = '<admin-email>';
--- 5. Add project members (required for employees to see projects):
+-- 5. Run: supabase/migrations/005_profile_status_and_auth_guards.sql
+-- 6. Run: supabase/migrations/006_admin_lifecycle_audit.sql
+-- 7. Run: supabase/migrations/007_active_admin_rls.sql
+-- 8. Run: supabase/migrations/008_security_consolidation.sql
+--    (auth model consolidation — idempotent, fixes activity triggers,
+--     adds invitations + push_subscriptions)
+-- 9. Create auth users (Supabase Dashboard → Authentication),
+--    then promote exactly one to admin explicitly:
+--        UPDATE profiles
+--        SET role = 'ADMIN', status = 'ACTIVE', active = true,
+--            approved_at = now()
+--        WHERE email = '<admin-email>';
+-- 10. Add project members (required for employees to see projects):
 --        INSERT INTO project_members (project_id, user_id)
 --        VALUES ('b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', '<employee-uuid>');
--- 6. Run this seed, then the sample task inserts at the bottom
---    with real user UUIDs.
+-- 11. Run this seed, then the sample task inserts at the bottom
+--     with real user UUIDs.
+--
+-- New signups are always PENDING with no role — approve them in the
+-- app (Team → Pending) or via invitations.
 -- ============================================================
 
 -- Sample Client

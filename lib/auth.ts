@@ -45,7 +45,7 @@ export async function getUserId(): Promise<string | null> {
 }
 
 /**
- * Check if the current user is an admin.
+ * Check if the current user is an active admin.
  */
 export async function isAdmin(): Promise<boolean> {
   const profile = await getUserProfile();
@@ -53,14 +53,18 @@ export async function isAdmin(): Promise<boolean> {
 }
 
 /**
- * Check if the current user is an employee.
+ * Check if the current user is an active employee.
  */
 export async function isEmployee(): Promise<boolean> {
   const profile = await getUserProfile();
   return profile?.status === "ACTIVE" && profile.role === "EMPLOYEE";
 }
 
-/** Require a valid session, including pending and suspended profiles. */
+/**
+ * Require any authenticated profile (including pending/suspended).
+ * Use only for flows that must work for those states (e.g. the
+ * pending page itself).
+ */
 export async function requireAuthenticatedProfile(): Promise<Profile> {
   const profile = await getUserProfile();
 
@@ -72,30 +76,66 @@ export async function requireAuthenticatedProfile(): Promise<Profile> {
 }
 
 /**
- * Require admin role. Throws if not admin.
+ * §57 — require an ACTIVE account with a role (admin or employee).
+ * This is the baseline for every application action. Pending and
+ * suspended users never pass this check.
  */
-export async function requireAdmin(): Promise<Profile> {
+export async function requireActiveUser(): Promise<Profile> {
   const profile = await requireAuthenticatedProfile();
 
-  if (profile.status !== "ACTIVE" || profile.role !== "ADMIN") {
-    throw new Error("Unauthorized: Admin access required");
+  if (profile.status !== "ACTIVE" || !profile.role) {
+    throw new Error(
+      profile.status === "PENDING"
+        ? "Your account is waiting for approval"
+        : profile.status === "SUSPENDED"
+          ? "Your account is suspended"
+          : "Account is not active"
+    );
   }
 
   return profile;
 }
 
 /**
- * Require any authenticated user.
+ * Require an ACTIVE EMPLOYEE.
  */
-export async function requireAuth(): Promise<Profile> {
-  const profile = await requireAuthenticatedProfile();
+export async function requireActiveEmployee(): Promise<Profile> {
+  const profile = await requireActiveUser();
 
-  if (profile.status !== "ACTIVE" || !profile.role) {
-    throw new Error("Account is not active");
+  if (profile.role !== "EMPLOYEE") {
+    throw new Error("Unauthorized: Employee access required");
   }
 
   return profile;
 }
+
+/**
+ * Require an ACTIVE ADMIN. Every privileged action funnels through
+ * this check — the client's claimed role is never trusted.
+ */
+export async function requireActiveAdmin(): Promise<Profile> {
+  const profile = await requireActiveUser();
+
+  if (profile.role !== "ADMIN") {
+    throw new Error("Unauthorized: Admin access required");
+  }
+
+  return profile;
+}
+
+// ──────────────────────────────────────────────
+// Back-compat aliases (existing call sites)
+// ──────────────────────────────────────────────
+
+/** @deprecated use requireActiveAdmin */
+export const requireAdmin = requireActiveAdmin;
+
+/** @deprecated use requireActiveUser */
+export const requireAuth = requireActiveUser;
+
+// ──────────────────────────────────────────────
+// Shared access helpers
+// ──────────────────────────────────────────────
 
 /**
  * Check if user has access to a project (admin or member).
@@ -120,7 +160,8 @@ export async function hasProjectAccess(
 }
 
 /**
- * Get all active employees.
+ * Get all ACTIVE employees (for assignment dropdowns).
+ * Pending and suspended users are never assignable.
  */
 export async function getActiveEmployees(): Promise<Profile[]> {
   const supabase = await createClient();
@@ -130,7 +171,6 @@ export async function getActiveEmployees(): Promise<Profile[]> {
     .select("*")
     .eq("role", "EMPLOYEE")
     .eq("status", "ACTIVE")
-    .eq("active", true)
     .order("full_name");
 
   if (error || !data) return [];

@@ -274,6 +274,34 @@ export async function createTaskAction(
     }
 
     const supabase = await createClient();
+
+    // §40 — server-side validation: archived projects and non-ACTIVE
+    // employees must never be assignable, even via a crafted request.
+    const { data: project } = await supabase
+      .from("projects")
+      .select("status")
+      .eq("id", validated.data.project_id)
+      .single();
+    if (!project) return { success: false, error: "Project not found" };
+    if (project.status === "ARCHIVED") {
+      return { success: false, error: "This project is archived — restore it before adding tasks." };
+    }
+
+    if (validated.data.assigned_to) {
+      const { data: assignee } = await supabase
+        .from("profiles")
+        .select("status, role")
+        .eq("id", validated.data.assigned_to)
+        .single();
+      if (!assignee) return { success: false, error: "Assignee not found" };
+      if (assignee.status !== "ACTIVE" || assignee.role !== "EMPLOYEE") {
+        return {
+          success: false,
+          error: "Tasks can only be assigned to active employees",
+        };
+      }
+    }
+
     const { data, error } = await supabase
       .from("tasks")
       .insert({
@@ -372,6 +400,41 @@ export async function updateTaskAction(
     }
 
     const supabase = await createClient();
+
+    // Same server-side guards as creation (§40)
+    const { data: project } = await supabase
+      .from("projects")
+      .select("status")
+      .eq("id", validated.data.project_id)
+      .single();
+    if (!project) return { success: false, error: "Project not found" };
+    if (project.status === "ARCHIVED") {
+      return { success: false, error: "This project is archived — restore it before adding tasks." };
+    }
+
+    if (validated.data.assigned_to) {
+      const { data: assignee } = await supabase
+        .from("profiles")
+        .select("status, role")
+        .eq("id", validated.data.assigned_to)
+        .single();
+      if (!assignee) return { success: false, error: "Assignee not found" };
+      if (assignee.status !== "ACTIVE" || assignee.role !== "EMPLOYEE") {
+        return {
+          success: false,
+          error: "Tasks can only be assigned to active employees",
+        };
+      }
+    }
+
+    // Fetch the previous assignee BEFORE the update so reassignment
+    // detection actually works (the old code read it afterwards).
+    const { data: before } = await supabase
+      .from("tasks")
+      .select("assigned_to")
+      .eq("id", id)
+      .single();
+
     const { data, error } = await supabase
       .from("tasks")
       .update({
@@ -395,24 +458,16 @@ export async function updateTaskAction(
 
     const task = data as Task;
 
-    // Notify reassignment
-    if (task.assigned_to) {
-      const { data: prev } = await supabase
-        .from("tasks")
-        .select("assigned_to")
-        .eq("id", id)
-        .single();
-      // Only notify if this is a fresh assignment
-      if (prev && prev.assigned_to !== task.assigned_to) {
-        await createNotification({
-          userId: task.assigned_to,
-          type: "TASK_ASSIGNED",
-          title: "New task assigned",
-          message: `${task.title}`,
-          referenceType: "task",
-          referenceId: task.id,
-        });
-      }
+    // Notify reassignment (only when the assignee actually changed)
+    if (task.assigned_to && before && before.assigned_to !== task.assigned_to) {
+      await createNotification({
+        userId: task.assigned_to,
+        type: "TASK_ASSIGNED",
+        title: "New task assigned",
+        message: `${task.title}`,
+        referenceType: "task",
+        referenceId: task.id,
+      });
     }
 
     return { success: true, data: task };
@@ -576,7 +631,7 @@ export async function updateTaskStatus(
         .from("profiles")
         .select("id")
         .eq("role", "ADMIN")
-        .eq("active", true);
+        .eq("status", "ACTIVE");
 
       const inputs = (admins ?? [])
         .filter((a) => a.id !== profile.id)
@@ -786,7 +841,13 @@ export async function getProjectsForTask(): Promise<
     const profile = await requireAuth();
     const supabase = await createClient();
 
-    let query = supabase.from("projects").select("id, name, client:clients(name)").order("name");
+    // §38 — only ACTIVE projects are valid targets for new work.
+    // (PLANNING / ON_HOLD / COMPLETED stay visible; ARCHIVED never.)
+    let query = supabase
+      .from("projects")
+      .select("id, name, client:clients(name)")
+      .neq("status", "ARCHIVED")
+      .order("name");
 
     if (profile.role === "EMPLOYEE") {
       const { data: memberProjects } = await supabase

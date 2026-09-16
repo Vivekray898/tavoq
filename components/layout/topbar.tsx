@@ -2,12 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { Bell, LogOut, Search, User } from "lucide-react";
+import { LogOut, Search, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { buttonVariants } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { SearchDialog } from "@/components/shared/search-dialog";
+import { NotificationBell } from "@/components/layout/notification-bell";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,14 +55,8 @@ export function Topbar({ profile }: TopbarProps) {
 
       <div className="flex-1" />
 
-      {/* Notifications */}
-      <Link
-        href="/notifications"
-        className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "relative")}
-        aria-label="Notifications"
-      >
-        <Bell className="size-4.5" strokeWidth={1.8} />
-      </Link>
+      {/* §22 — bell with unread badge + popover, same source as the sidebar */}
+      <NotificationBell />
 
       {/* User menu */}
       <DropdownMenu>

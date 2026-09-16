@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAdmin } from "@/lib/auth";
+import { requireAdmin, requireActiveUser } from "@/lib/auth";
 import type { ActionResponse, Profile, UserRole } from "@/types/database";
 
 export interface TeamMember extends Profile {
@@ -304,17 +304,18 @@ export async function getEmployeeProfile(
   }
 }
 
-/** Any authenticated user: active employees for dropdowns */
+/** Any authenticated user: ACTIVE employees for dropdowns (§49) */
 export async function getActiveEmployees(): Promise<
   ActionResponse<Array<{ id: string; full_name: string; avatar_url: string | null }>>
 > {
   try {
+    await requireActiveUser();
     const supabase = await createClient();
     const { data, error } = await supabase
       .from("profiles")
       .select("id, full_name, avatar_url")
       .eq("role", "EMPLOYEE")
-      .eq("active", true)
+      .eq("status", "ACTIVE")
       .order("full_name");
 
     if (error) {

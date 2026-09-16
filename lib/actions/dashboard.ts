@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAuth } from "@/lib/auth";
+import { requireActiveAdmin, requireAuth } from "@/lib/auth";
 import type { ActionResponse } from "@/types/database";
 
 // ──────────────────────────────────────────────
@@ -45,7 +45,7 @@ export async function getAdminDashboard(): Promise<
   ActionResponse<AdminDashboardData>
 > {
   try {
-    await requireAuth();
+    await requireActiveAdmin();
     const supabase = await createClient();
 
     const now = new Date();
