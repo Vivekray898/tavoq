@@ -133,7 +133,10 @@ export async function getTasks(filters?: {
     if (filters?.status === "OVERDUE") {
       const now = Date.now();
       tasks = tasks.filter(
-        (t) => t.deadline && new Date(t.deadline).getTime() < now && t.status !== "COMPLETED"
+        (t) =>
+          t.deadline &&
+          new Date(t.deadline).getTime() < now &&
+          t.status !== "COMPLETED"
       );
     }
 
@@ -192,6 +195,7 @@ export async function getTask(id: string): Promise<ActionResponse<TaskDetail>> {
       .single();
 
     if (error || !data) {
+      console.error("[getTask] task fetch", error);
       return { success: false, error: "Task not found" };
     }
 
@@ -208,8 +212,19 @@ export async function getTask(id: string): Promise<ActionResponse<TaskDetail>> {
       }
     }
 
-    // Fetch comments, attachments and project resources in parallel
-    const [commentsRes, attachmentsRes, resourcesRes, labelsRes, subtasksRes] = await Promise.all([
+    const projectId = row.project?.id ?? "";
+
+    // Run all dependent fetches in parallel, but return them keyed
+    // by name so a future reorder can't silently swap data between
+    // fields (the previous version destructured by position and every
+    // single field was populated from the wrong query).
+    const [
+      labelsRes,
+      subtasksRes,
+      commentsRes,
+      attachmentsRes,
+      resourcesRes,
+    ] = await Promise.all([
       supabase
         .from("task_labels")
         .select("label:labels(id, name, color)")
@@ -232,18 +247,42 @@ export async function getTask(id: string): Promise<ActionResponse<TaskDetail>> {
       supabase
         .from("project_resources")
         .select("id, title, url, description, resource_type")
-        .eq("project_id", row.project?.id ?? "")
+        .eq("project_id", projectId)
         .order("created_at", { ascending: true }),
     ]);
+
+    // Surface any individual query error instead of silently returning
+    // an empty array. This is what let the mis-destructure hide for so
+    // long: every query "succeeded", it just returned the wrong shape.
+    const queryErrors: Array<[string, unknown]> = [];
+    if (labelsRes.error) queryErrors.push(["labels", labelsRes.error]);
+    if (subtasksRes.error) queryErrors.push(["subtasks", subtasksRes.error]);
+    if (commentsRes.error) queryErrors.push(["comments", commentsRes.error]);
+    if (attachmentsRes.error) queryErrors.push(["attachments", attachmentsRes.error]);
+    if (resourcesRes.error) queryErrors.push(["resources", resourcesRes.error]);
+    if (queryErrors.length > 0) {
+      console.error("[getTask] dependent query errors", queryErrors);
+    }
 
     const labelRows = (labelsRes.data ?? []) as Array<{
       label: { id: string; name: string; color: string } | null;
     }>;
 
-    const task = {
+    // Dedupe comments by id as a safety net. Realtime + optimistic
+    // updates can otherwise deliver the same row twice, which produces
+    // "Encountered two children with the same key" on the client.
+    const rawComments = (commentsRes.data ?? []) as unknown as TaskDetail["comments"];
+    const commentsById = new Map<string, TaskDetail["comments"][number]>();
+    for (const c of rawComments) commentsById.set(c.id, c);
+    const comments = Array.from(commentsById.values()).sort(
+      (a, b) =>
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+
+    const task: TaskDetail = {
       ...toListItem(row),
       description: row.description ?? null,
-      comments: (commentsRes.data ?? []) as unknown as TaskDetail["comments"],
+      comments,
       attachments: (attachmentsRes.data ?? []) as unknown as TaskDetail["attachments"],
       resources: (resourcesRes.data ?? []) as unknown as TaskDetail["resources"],
       labels: labelRows
@@ -253,7 +292,8 @@ export async function getTask(id: string): Promise<ActionResponse<TaskDetail>> {
     };
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[getTask] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -270,7 +310,10 @@ export async function createTaskAction(
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
+      return {
+        success: false,
+        error: validated.error.issues[0]?.message ?? "Invalid input",
+      };
     }
 
     const supabase = await createClient();
@@ -284,7 +327,10 @@ export async function createTaskAction(
       .single();
     if (!project) return { success: false, error: "Project not found" };
     if (project.status === "ARCHIVED") {
-      return { success: false, error: "This project is archived — restore it before adding tasks." };
+      return {
+        success: false,
+        error: "This project is archived — restore it before adding tasks.",
+      };
     }
 
     if (validated.data.assigned_to) {
@@ -330,7 +376,10 @@ export async function createTaskAction(
     // Attach labels
     if (validated.data.label_ids && validated.data.label_ids.length > 0) {
       await supabase.from("task_labels").insert(
-        validated.data.label_ids.map((labelId) => ({ task_id: task.id, label_id: labelId }))
+        validated.data.label_ids.map((labelId) => ({
+          task_id: task.id,
+          label_id: labelId,
+        }))
       );
     }
 
@@ -382,7 +431,8 @@ export async function createTaskAction(
     }
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[createTaskAction] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -396,7 +446,10 @@ export async function updateTaskAction(
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
+      return {
+        success: false,
+        error: validated.error.issues[0]?.message ?? "Invalid input",
+      };
     }
 
     const supabase = await createClient();
@@ -409,7 +462,10 @@ export async function updateTaskAction(
       .single();
     if (!project) return { success: false, error: "Project not found" };
     if (project.status === "ARCHIVED") {
-      return { success: false, error: "This project is archived — restore it before adding tasks." };
+      return {
+        success: false,
+        error: "This project is archived — restore it before adding tasks.",
+      };
     }
 
     if (validated.data.assigned_to) {
@@ -428,7 +484,7 @@ export async function updateTaskAction(
     }
 
     // Fetch the previous assignee BEFORE the update so reassignment
-    // detection actually works (the old code read it afterwards).
+    // detection actually works.
     const { data: before } = await supabase
       .from("tasks")
       .select("assigned_to")
@@ -471,7 +527,8 @@ export async function updateTaskAction(
     }
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[updateTaskAction] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -481,17 +538,19 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
     const profile = await requireAdmin();
     const supabase = await createClient();
 
-    const [{ data: task }, { data: payment }, { data: attachments }] = await Promise.all([
-      supabase.from("tasks").select("id, title, project_id").eq("id", id).single(),
-      supabase.from("payments").select("id").eq("task_id", id).maybeSingle(),
-      supabase.from("task_attachments").select("file_path").eq("task_id", id),
-    ]);
+    const [{ data: task }, { data: payment }, { data: attachments }] =
+      await Promise.all([
+        supabase.from("tasks").select("id, title, project_id").eq("id", id).single(),
+        supabase.from("payments").select("id").eq("task_id", id).maybeSingle(),
+        supabase.from("task_attachments").select("file_path").eq("task_id", id),
+      ]);
 
     if (!task) return { success: false, error: "Task not found" };
     if (payment) {
       return {
         success: false,
-        error: "This task has a payment record. Archive it instead of deleting it.",
+        error:
+          "This task has a payment record. Archive it instead of deleting it.",
       };
     }
 
@@ -522,7 +581,8 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
     }
 
     return { success: true };
-  } catch {
+  } catch (err) {
+    console.error("[deleteTaskAction] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -694,7 +754,8 @@ export async function updateTaskStatus(
     }
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[updateTaskStatus] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -773,7 +834,8 @@ export async function uploadTaskAttachment(
     }
 
     return { success: true, data };
-  } catch {
+  } catch (err) {
+    console.error("[uploadTaskAttachment] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -792,7 +854,8 @@ export async function getAttachmentUrl(
       return { success: false, error: "Failed to open file" };
     }
     return { success: true, data: { url: data.signedUrl } };
-  } catch {
+  } catch (err) {
+    console.error("[getAttachmentUrl] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -825,7 +888,8 @@ export async function deleteTaskAttachment(
       return { success: false, error: "Failed to delete file" };
     }
     return { success: true };
-  } catch {
+  } catch (err) {
+    console.error("[deleteTaskAttachment] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -874,7 +938,8 @@ export async function getProjectsForTask(): Promise<
     );
 
     return { success: true, data: projects };
-  } catch {
+  } catch (err) {
+    console.error("[getProjectsForTask] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
