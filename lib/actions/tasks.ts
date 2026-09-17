@@ -57,7 +57,12 @@ interface TaskRow {
     client: EmbeddedOne<{ id: string; name: string }>;
   }>;
   assigned_user: EmbeddedOne<AssignedUser>;
-  labels?: EmbeddedOne<{ label: EmbeddedOne<LabelShape> }>[] | null;
+  /**
+   * `task_labels` is a one-to-many from `tasks`, so the outer value
+   * is a plain array. Each row's `label` is a many-to-one embed, so
+   * that side is the one that can come back as object-or-array.
+   */
+  labels?: Array<{ label: EmbeddedOne<LabelShape> }> | null;
   subtasks?: Array<{ id: string; done: boolean }> | null;
   comments_count?: Array<{ count: number }> | null;
   attachments_count?: Array<{ count: number }> | null;
@@ -83,7 +88,7 @@ function toListItem(row: TaskRow): TaskListItem {
   const assignee = one(row.assigned_user);
 
   const labels: LabelShape[] = (row.labels ?? [])
-    .map((l) => one(l.label))
+    .map((row) => one(row.label))
     .filter((l): l is LabelShape => !!l);
 
   return {
@@ -281,9 +286,9 @@ export async function getTask(id: string): Promise<ActionResponse<TaskDetail>> {
       console.error("[getTask] dependent query errors", queryErrors);
     }
 
-    // Normalise label rows. Supabase infers `label` as an array for
-    // embedded relations; PostgREST usually returns a single object.
-    // Handle both without fighting the type system.
+    // Normalise label rows. The outer `task_labels` result is a plain
+    // array; each row's `label` embed is the one that may come back as
+    // an object or a single-element array.
     type RawLabelRow = { label: EmbeddedOne<LabelShape> };
     const labels: LabelShape[] = (
       (labelsRes.data ?? []) as unknown as RawLabelRow[]
