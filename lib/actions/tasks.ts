@@ -9,11 +9,7 @@ import {
   sendEventEmail,
 } from "@/lib/notifications";
 import { ALLOWED_FILE_TYPES, MAX_FILE_SIZE } from "@/lib/constants";
-import type {
-  ActionResponse,
-  Task,
-  TaskStatus,
-} from "@/types/database";
+import type { ActionResponse, Task, TaskStatus } from "@/types/database";
 
 // ──────────────────────────────────────────────
 // Shared query shape
@@ -35,16 +31,33 @@ interface AssignedUser {
   avatar_url: string | null;
 }
 
-interface LabelRef {
-  label: { id: string; name: string; color: string } | null;
+interface LabelShape {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/**
+ * PostgREST returns a single object for many-to-one embeds but
+ * Supabase's inferred types describe them as arrays. Accept both
+ * shapes and normalise to a single object (or null).
+ */
+type EmbeddedOne<T> = T | T[] | null | undefined;
+
+function one<T>(value: EmbeddedOne<T>): T | null {
+  if (!value) return null;
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value;
 }
 
 interface TaskRow {
-  project:
-    | { id: string; name: string; client: { id: string; name: string } | null }
-    | null;
-  assigned_user: AssignedUser | null;
-  labels?: LabelRef[] | null;
+  project: EmbeddedOne<{
+    id: string;
+    name: string;
+    client: EmbeddedOne<{ id: string; name: string }>;
+  }>;
+  assigned_user: EmbeddedOne<AssignedUser>;
+  labels?: EmbeddedOne<{ label: EmbeddedOne<LabelShape> }>[] | null;
   subtasks?: Array<{ id: string; done: boolean }> | null;
   comments_count?: Array<{ count: number }> | null;
   attachments_count?: Array<{ count: number }> | null;
@@ -55,7 +68,7 @@ export interface TaskListItem extends Task {
   project_name: string | null;
   client_name: string | null;
   assigned_name: string | null;
-  labels: Array<{ id: string; name: string; color: string }>;
+  labels: LabelShape[];
   subtasks_done: number;
   subtasks_total: number;
   comments_count: number;
@@ -65,14 +78,20 @@ export interface TaskListItem extends Task {
 function toListItem(row: TaskRow): TaskListItem {
   const task = row as unknown as Task;
   const subtasks = row.subtasks ?? [];
+  const project = one(row.project);
+  const client = one(project?.client);
+  const assignee = one(row.assigned_user);
+
+  const labels: LabelShape[] = (row.labels ?? [])
+    .map((l) => one(l.label))
+    .filter((l): l is LabelShape => !!l);
+
   return {
     ...task,
-    project_name: row.project?.name ?? null,
-    client_name: row.project?.client?.name ?? null,
-    assigned_name: row.assigned_user?.full_name ?? null,
-    labels: (row.labels ?? [])
-      .map((l) => l.label)
-      .filter((l): l is { id: string; name: string; color: string } => !!l),
+    project_name: project?.name ?? null,
+    client_name: client?.name ?? null,
+    assigned_name: assignee?.full_name ?? null,
+    labels,
     subtasks_done: subtasks.filter((s) => s.done).length,
     subtasks_total: subtasks.length,
     comments_count: row.comments_count?.[0]?.count ?? 0,
@@ -133,12 +152,16 @@ export async function getTasks(filters?: {
     if (filters?.status === "OVERDUE") {
       const now = Date.now();
       tasks = tasks.filter(
-        (t) => t.deadline && new Date(t.deadline).getTime() < now && t.status !== "COMPLETED"
+        (t) =>
+          t.deadline &&
+          new Date(t.deadline).getTime() < now &&
+          t.status !== "COMPLETED"
       );
     }
 
     return { success: true, data: tasks };
-  } catch {
+  } catch (err) {
+    console.error("[getTasks] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -169,7 +192,7 @@ export interface TaskDetail extends TaskListItem {
     description: string | null;
     resource_type: string;
   }>;
-  labels: Array<{ id: string; name: string; color: string }>;
+  labels: LabelShape[];
   subtasks: Array<{
     id: string;
     task_id: string;
@@ -192,76 +215,109 @@ export async function getTask(id: string): Promise<ActionResponse<TaskDetail>> {
       .single();
 
     if (error || !data) {
+      console.error("[getTask] task fetch", error);
       return { success: false, error: "Task not found" };
     }
 
     const row = data as unknown as TaskRow & { description: string | null };
+    const project = one(row.project);
+    const assignee = one(row.assigned_user);
 
     // Check access for employees
     if (profile.role === "EMPLOYEE") {
-      const isAssignee = row.assigned_user?.id === profile.id;
+      const isAssignee = assignee?.id === profile.id;
       const hasAccess =
         isAssignee ||
-        (await hasProjectAccess(row.project?.id ?? "", profile.id, profile.role));
+        (await hasProjectAccess(project?.id ?? "", profile.id, profile.role));
       if (!hasAccess) {
         return { success: false, error: "You don't have access to this task" };
       }
     }
 
-    // Fetch labels, subtasks, comments, attachments and project resources
-    // in parallel. NOTE: the destructuring order below MUST match the order
-    // of the queries in this array.
-    const [
-      labelsRes,
-      subtasksRes,
-      commentsRes,
-      attachmentsRes,
-      resourcesRes,
-    ] = await Promise.all([
-      supabase
-        .from("task_labels")
-        .select("label:labels(id, name, color)")
-        .eq("task_id", id),
-      supabase
-        .from("task_subtasks")
-        .select("*")
-        .eq("task_id", id)
-        .order("position", { ascending: true }),
-      supabase
-        .from("task_comments")
-        .select("*, user:profiles(id, full_name, avatar_url)")
-        .eq("task_id", id)
-        .order("created_at", { ascending: true }),
-      supabase
-        .from("task_attachments")
-        .select("*")
-        .eq("task_id", id)
-        .order("created_at", { ascending: true }),
-      supabase
-        .from("project_resources")
-        .select("id, title, url, description, resource_type")
-        .eq("project_id", row.project?.id ?? "")
-        .order("created_at", { ascending: true }),
-    ]);
+    const projectId = project?.id ?? "";
 
-    const labelRows = (labelsRes.data ?? []) as Array<{
-      label: { id: string; name: string; color: string } | null;
-    }>;
+    // Run all dependent fetches in parallel. Return them keyed by name
+    // so a future reorder can't silently swap data between fields.
+    const [labelsRes, subtasksRes, commentsRes, attachmentsRes, resourcesRes] =
+      await Promise.all([
+        supabase
+          .from("task_labels")
+          .select("label:labels(id, name, color)")
+          .eq("task_id", id),
+        supabase
+          .from("task_subtasks")
+          .select("*")
+          .eq("task_id", id)
+          .order("position", { ascending: true }),
+        supabase
+          .from("task_comments")
+          .select("*, user:profiles(id, full_name, avatar_url)")
+          .eq("task_id", id)
+          .order("created_at", { ascending: true }),
+        supabase
+          .from("task_attachments")
+          .select("*")
+          .eq("task_id", id)
+          .order("created_at", { ascending: true }),
+        supabase
+          .from("project_resources")
+          .select("id, title, url, description, resource_type")
+          .eq("project_id", projectId)
+          .order("created_at", { ascending: true }),
+      ]);
 
-    const task = {
+    // Surface individual query errors instead of silently returning an
+    // empty array. A quiet failure is what let the previous mis-destructure
+    // hide for so long.
+    const queryErrors: Array<[string, unknown]> = [];
+    if (labelsRes.error) queryErrors.push(["labels", labelsRes.error]);
+    if (subtasksRes.error) queryErrors.push(["subtasks", subtasksRes.error]);
+    if (commentsRes.error) queryErrors.push(["comments", commentsRes.error]);
+    if (attachmentsRes.error)
+      queryErrors.push(["attachments", attachmentsRes.error]);
+    if (resourcesRes.error)
+      queryErrors.push(["resources", resourcesRes.error]);
+    if (queryErrors.length > 0) {
+      console.error("[getTask] dependent query errors", queryErrors);
+    }
+
+    // Normalise label rows. Supabase infers `label` as an array for
+    // embedded relations; PostgREST usually returns a single object.
+    // Handle both without fighting the type system.
+    type RawLabelRow = { label: EmbeddedOne<LabelShape> };
+    const labels: LabelShape[] = (
+      (labelsRes.data ?? []) as unknown as RawLabelRow[]
+    )
+      .map((r) => one(r.label))
+      .filter((l): l is LabelShape => !!l);
+
+    // Dedupe comments by id. Realtime + optimistic updates can
+    // otherwise deliver the same row twice, which produces
+    // "Encountered two children with the same key" on the client.
+    const rawComments = (commentsRes.data ??
+      []) as unknown as TaskDetail["comments"];
+    const commentsById = new Map<string, TaskDetail["comments"][number]>();
+    for (const c of rawComments) commentsById.set(c.id, c);
+    const comments = Array.from(commentsById.values()).sort(
+      (a, b) =>
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+
+    const task: TaskDetail = {
       ...toListItem(row),
       description: row.description ?? null,
-      comments: (commentsRes.data ?? []) as unknown as TaskDetail["comments"],
-      attachments: (attachmentsRes.data ?? []) as unknown as TaskDetail["attachments"],
-      resources: (resourcesRes.data ?? []) as unknown as TaskDetail["resources"],
-      labels: labelRows
-        .map((l) => l.label)
-        .filter((l): l is { id: string; name: string; color: string } => !!l),
+      comments,
+      attachments: (attachmentsRes.data ??
+        []) as unknown as TaskDetail["attachments"],
+      resources: (resourcesRes.data ??
+        []) as unknown as TaskDetail["resources"],
+      labels,
       subtasks: (subtasksRes.data ?? []) as unknown as TaskDetail["subtasks"],
     };
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[getTask] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -278,7 +334,10 @@ export async function createTaskAction(
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
+      return {
+        success: false,
+        error: validated.error.issues[0]?.message ?? "Invalid input",
+      };
     }
 
     const supabase = await createClient();
@@ -292,7 +351,10 @@ export async function createTaskAction(
       .single();
     if (!project) return { success: false, error: "Project not found" };
     if (project.status === "ARCHIVED") {
-      return { success: false, error: "This project is archived — restore it before adding tasks." };
+      return {
+        success: false,
+        error: "This project is archived — restore it before adding tasks.",
+      };
     }
 
     if (validated.data.assigned_to) {
@@ -338,7 +400,10 @@ export async function createTaskAction(
     // Attach labels
     if (validated.data.label_ids && validated.data.label_ids.length > 0) {
       await supabase.from("task_labels").insert(
-        validated.data.label_ids.map((labelId) => ({ task_id: task.id, label_id: labelId }))
+        validated.data.label_ids.map((labelId) => ({
+          task_id: task.id,
+          label_id: labelId,
+        }))
       );
     }
 
@@ -376,13 +441,16 @@ export async function createTaskAction(
       });
 
       if (assignee?.email) {
+        const client = one(
+          (proj as unknown as { client: EmbeddedOne<{ name: string }> } | null)
+            ?.client
+        );
         await sendEventEmail("TASK_ASSIGNED", {
           to: assignee.email,
           employeeName: assignee.full_name,
           taskTitle: task.title,
           projectName: proj?.name ?? "",
-          clientName:
-            (proj?.client as unknown as { name?: string }[] | null)?.[0]?.name ?? "",
+          clientName: client?.name ?? "",
           deadline: task.deadline,
           payoutAmount: Number(task.payout_amount),
         });
@@ -390,7 +458,8 @@ export async function createTaskAction(
     }
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[createTaskAction] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -404,7 +473,10 @@ export async function updateTaskAction(
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
-      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid input" };
+      return {
+        success: false,
+        error: validated.error.issues[0]?.message ?? "Invalid input",
+      };
     }
 
     const supabase = await createClient();
@@ -417,7 +489,10 @@ export async function updateTaskAction(
       .single();
     if (!project) return { success: false, error: "Project not found" };
     if (project.status === "ARCHIVED") {
-      return { success: false, error: "This project is archived — restore it before adding tasks." };
+      return {
+        success: false,
+        error: "This project is archived — restore it before adding tasks.",
+      };
     }
 
     if (validated.data.assigned_to) {
@@ -436,7 +511,7 @@ export async function updateTaskAction(
     }
 
     // Fetch the previous assignee BEFORE the update so reassignment
-    // detection actually works (the old code read it afterwards).
+    // detection actually works.
     const { data: before } = await supabase
       .from("tasks")
       .select("assigned_to")
@@ -479,7 +554,8 @@ export async function updateTaskAction(
     }
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[updateTaskAction] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -489,17 +565,23 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
     const profile = await requireAdmin();
     const supabase = await createClient();
 
-    const [{ data: task }, { data: payment }, { data: attachments }] = await Promise.all([
-      supabase.from("tasks").select("id, title, project_id").eq("id", id).single(),
-      supabase.from("payments").select("id").eq("task_id", id).maybeSingle(),
-      supabase.from("task_attachments").select("file_path").eq("task_id", id),
-    ]);
+    const [{ data: task }, { data: payment }, { data: attachments }] =
+      await Promise.all([
+        supabase
+          .from("tasks")
+          .select("id, title, project_id")
+          .eq("id", id)
+          .single(),
+        supabase.from("payments").select("id").eq("task_id", id).maybeSingle(),
+        supabase.from("task_attachments").select("file_path").eq("task_id", id),
+      ]);
 
     if (!task) return { success: false, error: "Task not found" };
     if (payment) {
       return {
         success: false,
-        error: "This task has a payment record. Archive it instead of deleting it.",
+        error:
+          "This task has a payment record. Archive it instead of deleting it.",
       };
     }
 
@@ -526,11 +608,15 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
     });
     if (auditError) {
       console.error("[deleteTaskAction] audit", auditError);
-      return { success: false, error: "Task deleted, but audit logging failed" };
+      return {
+        success: false,
+        error: "Task deleted, but audit logging failed",
+      };
     }
 
     return { success: true };
-  } catch {
+  } catch (err) {
+    console.error("[deleteTaskAction] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -567,7 +653,9 @@ export async function updateTaskStatus(
       const allowed =
         (currentTask.status === "SUBMITTED" &&
           (status === "COMPLETED" || status === "REVISION_REQUIRED")) ||
-        (status === "TODO" || status === "IN_PROGRESS" || status === "COMPLETED");
+        status === "TODO" ||
+        status === "IN_PROGRESS" ||
+        status === "COMPLETED";
       if (!allowed) {
         return { success: false, error: "Not an allowed transition" };
       }
@@ -579,7 +667,8 @@ export async function updateTaskStatus(
       const allowed =
         (currentTask.status === "TODO" && status === "IN_PROGRESS") ||
         (currentTask.status === "IN_PROGRESS" && status === "SUBMITTED") ||
-        (currentTask.status === "REVISION_REQUIRED" && status === "IN_PROGRESS") ||
+        (currentTask.status === "REVISION_REQUIRED" &&
+          status === "IN_PROGRESS") ||
         (currentTask.status === "REVISION_REQUIRED" && status === "SUBMITTED");
       if (!allowed) {
         return { success: false, error: "Not an allowed transition" };
@@ -702,7 +791,8 @@ export async function updateTaskStatus(
     }
 
     return { success: true, data: task };
-  } catch {
+  } catch (err) {
+    console.error("[updateTaskStatus] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -781,7 +871,8 @@ export async function uploadTaskAttachment(
     }
 
     return { success: true, data };
-  } catch {
+  } catch (err) {
+    console.error("[uploadTaskAttachment] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -800,7 +891,8 @@ export async function getAttachmentUrl(
       return { success: false, error: "Failed to open file" };
     }
     return { success: true, data: { url: data.signedUrl } };
-  } catch {
+  } catch (err) {
+    console.error("[getAttachmentUrl] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -833,7 +925,8 @@ export async function deleteTaskAttachment(
       return { success: false, error: "Failed to delete file" };
     }
     return { success: true };
-  } catch {
+  } catch (err) {
+    console.error("[deleteTaskAttachment] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
@@ -873,16 +966,24 @@ export async function getProjectsForTask(): Promise<
       return { success: false, error: "Failed to load projects" };
     }
 
-    const projects = (data ?? []).map(
-      (p: { id: string; name: string; client: { name: string }[] | null }) => ({
+    type RawProject = {
+      id: string;
+      name: string;
+      client: EmbeddedOne<{ name: string }>;
+    };
+
+    const projects = ((data ?? []) as unknown as RawProject[]).map((p) => {
+      const client = one(p.client);
+      return {
         id: p.id,
         name: p.name,
-        client_name: p.client?.[0]?.name ?? "",
-      })
-    );
+        client_name: client?.name ?? "",
+      };
+    });
 
     return { success: true, data: projects };
-  } catch {
+  } catch (err) {
+    console.error("[getProjectsForTask] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }
