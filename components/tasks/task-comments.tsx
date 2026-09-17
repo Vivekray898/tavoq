@@ -19,17 +19,23 @@ interface TaskCommentsProps {
   initialComments: Comment[];
   currentUserId: string;
   onAttachmentAdded?: (attachment: Attachment) => void;
+  /** Max height of the scrollable message area. */
+  heightClassName?: string;
 }
 
 /**
  * Conversation-style task communication (§13, §14).
  * Realtime scoped to this task; cleaned up on unmount (§46).
+ *
+ * Messages live inside a fixed-height scroll region so a long thread
+ * never pushes the page around, and the composer stays pinned below it.
  */
 export function TaskComments({
   taskId,
   initialComments,
   currentUserId,
   onAttachmentAdded,
+  heightClassName = "h-80",
 }: TaskCommentsProps) {
   const [comments, setComments] = useState<Comment[]>(initialComments);
   const [value, setValue] = useState("");
@@ -37,6 +43,7 @@ export function TaskComments({
   const [uploadingFile, setUploadingFile] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   // Keep a ref to the latest comments so realtime handlers can read
   // the current list without being re-subscribed on every change.
@@ -63,7 +70,6 @@ export function TaskComments({
       comment: string;
       created_at: string;
     }) {
-      // Dedupe against the *current* list before doing any work.
       if (commentsRef.current.some((c) => c.id === row.id)) return;
 
       let author: { id: string; full_name: string; avatar_url: string | null } | null =
@@ -114,7 +120,6 @@ export function TaskComments({
             comment: string;
             created_at: string;
           };
-          // Fire and forget; the append function dedupes internally.
           void fetchAuthorAndAppend(row);
         }
       )
@@ -125,9 +130,11 @@ export function TaskComments({
     };
   }, [taskId]);
 
-  // Scroll to newest message
+  // Scroll to newest message inside the scroll container only.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [comments.length]);
 
   async function handleSend() {
@@ -153,8 +160,6 @@ export function TaskComments({
 
     if (result.success && result.data) {
       setComments((prev) => {
-        // Replace the optimistic row with the real one, and drop any
-        // duplicate that realtime may have inserted in the meantime.
         const realId = result.data!.id;
         const withoutOptimistic = prev.filter((c) => c.id !== optimisticId);
         if (withoutOptimistic.some((c) => c.id === realId)) {
@@ -202,54 +207,63 @@ export function TaskComments({
   }
 
   return (
-    <div className="flex flex-col">
-      {/* Messages */}
-      <div className="space-y-4">
-        {comments.length === 0 && (
-          <p className="py-2 text-center text-[13px] text-muted-foreground">
+    <div className="overflow-hidden rounded-xl border bg-card">
+      {/* Scrollable messages */}
+      <div
+        ref={scrollRef}
+        className={cn(
+          "overflow-y-auto px-4 py-4",
+          heightClassName
+        )}
+      >
+        {comments.length === 0 ? (
+          <p className="py-6 text-center text-[13px] text-muted-foreground">
             No messages yet. Say hi or ask a question.
           </p>
-        )}
-        {comments.map((c) => {
-          const own = c.user_id === currentUserId;
-          const isOptimistic = c.id.startsWith("optimistic-");
-          return (
-            <div
-              key={c.id}
-              className={cn("flex gap-2.5", own && "flex-row-reverse")}
-            >
-              <Avatar className="size-7 shrink-0">
-                <AvatarFallback className="text-[10px]">
-                  {getInitials(c.user.full_name)}
-                </AvatarFallback>
-              </Avatar>
-              <div className={cn("min-w-0 max-w-[80%]", own && "text-right")}>
-                <p className="text-xs text-muted-foreground">
-                  {own ? "You" : c.user.full_name}
-                  <span className="mx-1.5">·</span>
-                  {formatTime(c.created_at)}
-                  {isOptimistic && <span className="ml-1">· sending…</span>}
-                </p>
+        ) : (
+          <div className="space-y-4">
+            {comments.map((c) => {
+              const own = c.user_id === currentUserId;
+              const isOptimistic = c.id.startsWith("optimistic-");
+              return (
                 <div
-                  className={cn(
-                    "mt-1 inline-block whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
-                    own
-                      ? "rounded-br-md bg-primary text-primary-foreground"
-                      : "rounded-bl-md bg-muted text-foreground",
-                    isOptimistic && "opacity-70"
-                  )}
+                  key={c.id}
+                  className={cn("flex gap-2.5", own && "flex-row-reverse")}
                 >
-                  {c.comment}
+                  <Avatar className="size-7 shrink-0">
+                    <AvatarFallback className="text-[10px]">
+                      {getInitials(c.user.full_name)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className={cn("min-w-0 max-w-[80%]", own && "text-right")}>
+                    <p className="text-xs text-muted-foreground">
+                      {own ? "You" : c.user.full_name}
+                      <span className="mx-1.5">·</span>
+                      {formatTime(c.created_at)}
+                      {isOptimistic && <span className="ml-1">· sending…</span>}
+                    </p>
+                    <div
+                      className={cn(
+                        "mt-1 inline-block whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
+                        own
+                          ? "rounded-br-md bg-primary text-primary-foreground"
+                          : "rounded-bl-md bg-muted text-foreground",
+                        isOptimistic && "opacity-70"
+                      )}
+                    >
+                      {c.comment}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          );
-        })}
-        <div ref={bottomRef} />
+              );
+            })}
+            <div ref={bottomRef} />
+          </div>
+        )}
       </div>
 
-      {/* Composer */}
-      <div className="sticky bottom-0 mt-4 flex items-end gap-2 border-t bg-background pt-3">
+      {/* Composer pinned below the scroll area */}
+      <div className="flex items-end gap-2 border-t bg-background px-3 py-3">
         <input
           ref={fileInputRef}
           type="file"

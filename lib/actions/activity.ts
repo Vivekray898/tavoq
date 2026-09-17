@@ -20,7 +20,8 @@ export interface ActivityItem {
 
 /** Task-scoped activity timeline (§12) */
 export async function getTaskActivity(
-  taskId: string
+  taskId: string,
+  limit = 20
 ): Promise<ActionResponse<ActivityItem[]>> {
   try {
     await requireAuth();
@@ -33,7 +34,7 @@ export async function getTaskActivity(
       )
       .eq("task_id", taskId)
       .order("created_at", { ascending: false })
-      .limit(50);
+      .limit(limit);
 
     if (error) {
       console.error("[getTaskActivity]", error);
@@ -48,7 +49,10 @@ export async function getTaskActivity(
           type: ActivityType;
           detail: string | null;
           created_at: string;
-          actor: { full_name: string; avatar_url: string | null }[] | { full_name: string; avatar_url: string | null } | null;
+          actor:
+            | { full_name: string; avatar_url: string | null }[]
+            | { full_name: string; avatar_url: string | null }
+            | null;
         }) => {
           const a = Array.isArray(row.actor) ? row.actor[0] : row.actor;
           return {
@@ -101,8 +105,14 @@ export async function getProjectActivity(
           detail: string | null;
           created_at: string;
           task_id: string | null;
-          actor: { full_name: string; avatar_url: string | null }[] | { full_name: string; avatar_url: string | null } | null;
-          task: { id: string; title: string }[] | { id: string; title: string } | null;
+          actor:
+            | { full_name: string; avatar_url: string | null }[]
+            | { full_name: string; avatar_url: string | null }
+            | null;
+          task:
+            | { id: string; title: string }[]
+            | { id: string; title: string }
+            | null;
         }) => {
           const a = Array.isArray(row.actor) ? row.actor[0] : row.actor;
           const t = Array.isArray(row.task) ? row.task[0] : row.task;
@@ -154,8 +164,14 @@ export async function getRecentActivity(
           detail: string | null;
           created_at: string;
           task_id: string | null;
-          actor: { full_name: string; avatar_url: string | null }[] | { full_name: string; avatar_url: string | null } | null;
-          task: { id: string; title: string }[] | { id: string; title: string } | null;
+          actor:
+            | { full_name: string; avatar_url: string | null }[]
+            | { full_name: string; avatar_url: string | null }
+            | null;
+          task:
+            | { id: string; title: string }[]
+            | { id: string; title: string }
+            | null;
         }) => {
           const a = Array.isArray(row.actor) ? row.actor[0] : row.actor;
           const t = Array.isArray(row.task) ? row.task[0] : row.task;
