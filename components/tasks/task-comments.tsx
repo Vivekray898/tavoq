@@ -7,7 +7,9 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
 import { addCommentAction } from "@/lib/actions/comments";
-import { uploadTaskAttachment } from "@/lib/actions/tasks";
+import {
+  uploadTaskAttachment,
+} from "@/lib/actions/tasks";
 import { getInitials, formatTime, cn } from "@/lib/utils";
 import type { TaskDetail } from "@/lib/actions/tasks";
 
@@ -38,16 +40,10 @@ export function TaskComments({
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Keep a ref to the latest comments so realtime handlers can read
-  // the current list without being re-subscribed on every change.
-  const commentsRef = useRef<Comment[]>(comments);
-  useEffect(() => {
-    commentsRef.current = comments;
-  }, [comments]);
-
   // Reset when task changes (navigating task A → B → A must not
   // duplicate subscriptions or keep stale messages)
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset on task switch
     setComments(initialComments);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
@@ -55,47 +51,6 @@ export function TaskComments({
   // Realtime: new comments on this task only
   useEffect(() => {
     const supabase = createClient();
-
-    async function fetchAuthorAndAppend(row: {
-      id: string;
-      task_id: string;
-      user_id: string;
-      comment: string;
-      created_at: string;
-    }) {
-      // Dedupe against the *current* list before doing any work.
-      if (commentsRef.current.some((c) => c.id === row.id)) return;
-
-      let author: { id: string; full_name: string; avatar_url: string | null } | null =
-        null;
-      try {
-        const { data } = await supabase
-          .from("profiles")
-          .select("id, full_name, avatar_url")
-          .eq("id", row.user_id)
-          .single();
-        author = data ?? null;
-      } catch {
-        author = null;
-      }
-
-      setComments((prev) => {
-        if (prev.some((c) => c.id === row.id)) return prev;
-        return [
-          ...prev,
-          {
-            ...row,
-            user:
-              author ?? {
-                id: row.user_id,
-                full_name: "Unknown",
-                avatar_url: null,
-              },
-          },
-        ];
-      });
-    }
-
     const channel = supabase
       .channel(`task-comments:${taskId}`)
       .on(
@@ -114,11 +69,43 @@ export function TaskComments({
             comment: string;
             created_at: string;
           };
-          // Fire and forget; the append function dedupes internally.
-          void fetchAuthorAndAppend(row);
+          // Dedupe (optimistic echo or realtime race)
+          setComments((prev) => {
+            if (prev.some((c) => c.id === row.id)) return prev;
+            // Fetch author profile is not possible in payload;
+            // realtime RLS sends only columns. We refetch lazily via
+            // a lightweight profiles lookup below.
+            addAuthorAndInsert(row);
+            return prev;
+          });
         }
       )
       .subscribe();
+
+    async function addAuthorAndInsert(row: {
+      id: string;
+      task_id: string;
+      user_id: string;
+      comment: string;
+      created_at: string;
+    }) {
+      const supabase2 = createClient();
+      const { data: user } = await supabase2
+        .from("profiles")
+        .select("id, full_name, avatar_url")
+        .eq("id", row.user_id)
+        .single();
+      setComments((prev) => {
+        if (prev.some((c) => c.id === row.id)) return prev;
+        return [
+          ...prev,
+          {
+            ...row,
+            user: user ?? { id: row.user_id, full_name: "Unknown", avatar_url: null },
+          },
+        ];
+      });
+    }
 
     return () => {
       supabase.removeChannel(channel);
@@ -135,11 +122,9 @@ export function TaskComments({
     if (!text || sending) return;
 
     setSending(true);
-    const optimisticId = `optimistic-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}`;
+    // Optimistic message (§38)
     const optimistic: Comment = {
-      id: optimisticId,
+      id: `optimistic-${Date.now()}`,
       task_id: taskId,
       user_id: currentUserId,
       comment: text,
@@ -152,18 +137,13 @@ export function TaskComments({
     const result = await addCommentAction(taskId, text);
 
     if (result.success && result.data) {
-      setComments((prev) => {
-        // Replace the optimistic row with the real one, and drop any
-        // duplicate that realtime may have inserted in the meantime.
-        const realId = result.data!.id;
-        const withoutOptimistic = prev.filter((c) => c.id !== optimisticId);
-        if (withoutOptimistic.some((c) => c.id === realId)) {
-          return withoutOptimistic;
-        }
-        return [...withoutOptimistic, result.data!];
-      });
+      // Replace optimistic with the real row
+      setComments((prev) =>
+        prev.map((c) => (c.id === optimistic.id ? result.data! : c))
+      );
     } else {
-      setComments((prev) => prev.filter((c) => c.id !== optimisticId));
+      // Roll back
+      setComments((prev) => prev.filter((c) => c.id !== optimistic.id));
       setValue(text);
       toast.error(result.error ?? "Couldn't send your message");
     }
@@ -171,6 +151,7 @@ export function TaskComments({
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends, Shift+Enter adds a newline (§13)
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
