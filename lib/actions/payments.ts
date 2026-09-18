@@ -30,6 +30,8 @@ export interface PaymentItem {
   status: "PENDING" | "PAID";
   paid_at: string | null;
   payment_note: string | null;
+  /** Present on workspace/history items; batch-returns may omit it. */
+  created_at?: string;
 }
 
 export interface EmployeeSummary {
@@ -136,6 +138,8 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
       } | null;
     };
 
+    // §6 — created date is shown on every payment detail.
+
     const items: PaymentItem[] = (paymentsRes.data ?? []).map((raw: unknown) => {
       const row = raw as PaymentRow;
       const task = row.task;
@@ -153,6 +157,7 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
         status: row.paid_at ? "PAID" : "PENDING",
         paid_at: row.paid_at,
         payment_note: row.payment_note,
+        created_at: row.created_at,
       };
     });
 
@@ -540,6 +545,7 @@ export async function markPaymentPaid(
       amount: number | string;
       paid_at: string | null;
       payment_note: string | null;
+      created_at?: string;
       employee: { full_name: string; email: string }[] | { full_name: string; email: string } | null;
       task: { id: string; title: string; assigned_to: string | null } | null;
     };
@@ -581,6 +587,7 @@ export async function markPaymentPaid(
         status: "PAID",
         paid_at: paidAt,
         payment_note: paymentNote || paidRow.payment_note,
+        created_at: paidRow.created_at,
       },
     };
   } catch {

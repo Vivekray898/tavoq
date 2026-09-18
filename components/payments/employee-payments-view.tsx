@@ -154,7 +154,7 @@ export function EmployeePaymentsView() {
                         kind: item.kind,
                         employee_id: null,
                         employee_name: null,
-                        task_id: item.kind === "TASK" ? item.id : null,
+                        task_id: null,
                         label: item.label,
                         project_name: item.project_name,
                         amount: item.amount,

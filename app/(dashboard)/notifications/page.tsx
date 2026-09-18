@@ -12,6 +12,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Check } from "lucide-react";
 import { EmptyState } from "@/components/shared/empty-state";
 import { PushPermissionCard } from "@/components/notifications/push-permission-card";
 import { useNotifications } from "@/components/providers/notifications-provider";
@@ -128,6 +129,20 @@ export default function NotificationsPage() {
                     <span className="shrink-0 text-xs text-muted-foreground">
                       {getRelativeTime(n.created_at)}
                     </span>
+                    {!n.read && (
+                      <button
+                        type="button"
+                        aria-label="Mark as read"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          markRead(n.id);
+                        }}
+                        className="flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      >
+                        <Check className="size-4" />
+                      </button>
+                    )}
                   </Link>
                 );
               })}

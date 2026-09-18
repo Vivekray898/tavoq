@@ -713,6 +713,10 @@ export function AdminPaymentsView() {
                   </p>
                 </div>
                 <div>
+                  <p className="text-xs text-muted-foreground">Created</p>
+                  <p className="mt-0.5">{detail.created_at ? formatDate(detail.created_at) : "—"}</p>
+                </div>
+                <div>
                   <p className="text-xs text-muted-foreground">Paid date</p>
                   <p className="mt-0.5">{detail.paid_at ? formatDate(detail.paid_at) : "—"}</p>
                 </div>

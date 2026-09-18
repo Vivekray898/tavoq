@@ -37,7 +37,7 @@ import { LabelsEditor } from "@/components/tasks/labels-editor";
 import { ActivityTimeline } from "@/components/tasks/activity-timeline";
 import { SubmitTaskDialog } from "@/components/tasks/submit-task-dialog";
 import { SkeletonPage } from "@/components/shared/skeleton-loader";
-import { StatusDot } from "@/components/shared/status-dot";
+import { StatusDot, PriorityTag } from "@/components/shared/status-dot";
 import {
   updateTaskStatus,
   uploadTaskAttachment,
@@ -55,9 +55,12 @@ import {
   formatDeadline,
   formatFileSize,
   getInitials,
+  getRelativeTime,
   isOverdue,
+  isDueToday,
   cn,
 } from "@/lib/utils";
+import { PRIORITY_LABELS } from "@/lib/constants";
 import type { TaskDetail } from "@/lib/actions/tasks";
 import type { ResourceType } from "@/types/database";
 
@@ -242,6 +245,8 @@ export default function TaskDetailPage() {
   }
 
   const overdue = task.deadline ? isOverdue(task.deadline) : false;
+  const dueToday = task.deadline && !overdue ? isDueToday(task.deadline) : false;
+  const updated = getRelativeTime(task.updated_at);
 
   return (
     <div className="pb-24 lg:pb-10">
@@ -283,6 +288,28 @@ export default function TaskDetailPage() {
             {task.project_name}
           </Link>
         </p>
+        {/* §1 — scannable attention indicators + relative timestamps */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <PriorityTag priority={task.priority} />
+          {overdue && task.status !== "COMPLETED" && (
+            <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300">
+              Overdue
+            </span>
+          )}
+          {dueToday && task.status !== "COMPLETED" && (
+            <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+              Due today
+            </span>
+          )}
+          {task.completed_at && (
+            <span className="text-xs text-muted-foreground">
+              Completed {getRelativeTime(task.completed_at)}
+            </span>
+          )}
+          <span className="text-xs text-muted-foreground/80">
+            Updated {updated}
+          </span>
+        </div>
         {/* Labels (§19) */}
         <div className="mt-2.5">
           <LabelsEditor
@@ -452,6 +479,11 @@ export default function TaskDetailPage() {
             </div>
             <Separator />
             <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Priority</span>
+              <span className="font-medium">{PRIORITY_LABELS[task.priority] ?? task.priority}</span>
+            </div>
+            <Separator />
+            <div className="flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5 text-muted-foreground">
                 <User className="size-3.5" /> Assigned to
               </span>
@@ -469,11 +501,59 @@ export default function TaskDetailPage() {
               <span className="flex items-center gap-1.5 text-muted-foreground">
                 <Calendar className="size-3.5" /> Due
               </span>
-              <span className={cn("font-medium", overdue && "text-destructive")}>
+              <span className={cn("font-medium", overdue && "text-destructive", dueToday && !overdue && "text-amber-600 dark:text-amber-400")}>
                 {formatDeadline(task.deadline)}
               </span>
             </div>
+            <Separator />
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">Created</span>
+              <span className="text-muted-foreground">{getRelativeTime(task.created_at)}</span>
+            </div>
           </div>
+          {/* §1 — full transition map so nothing is hidden behind the sticky bar */}
+          {isAdmin && task.status !== "COMPLETED" && (
+            <div className="rounded-xl border bg-card px-4 py-3.5">
+              <p className="mb-2 text-xs font-medium text-muted-foreground">Change status</p>
+              {task.status === "SUBMITTED" ? (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => handleStatus("COMPLETED")}
+                    disabled={updating}
+                  >
+                    <CheckCircle2 className="size-3.5" /> Approve
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setRevisionOpen(true)}
+                    disabled={updating}
+                  >
+                    <RotateCcw className="size-3.5" /> Request revision
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {task.status !== "TODO" && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => handleStatus("TODO")} disabled={updating}>
+                      To do
+                    </Button>
+                  )}
+                  {task.status !== "IN_PROGRESS" && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => handleStatus("IN_PROGRESS")} disabled={updating}>
+                      In progress
+                    </Button>
+                  )}
+                  <Button type="button" size="sm" variant="outline" onClick={() => handleStatus("COMPLETED")} disabled={updating}>
+                    <CheckCircle2 className="size-3.5" /> Completed
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
         </aside>
       </div>
 

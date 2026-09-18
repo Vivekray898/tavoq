@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   List,
@@ -145,6 +146,7 @@ function loadStoredFilters(): Filters {
 
 export default function TasksPage() {
   const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
   const { userId: currentUserId, role: userRole } = useSession();
   const isAdmin = userRole === "ADMIN";
 
@@ -169,16 +171,20 @@ export default function TasksPage() {
   const [filterOpen, setFilterOpen] = useState(false);
 
   // §25 — remember filters while navigating (session-scoped, not forever).
-  // Hydrated in a microtask to avoid setState-in-effect and SSR mismatch.
+  // Hydrated in a microtask to avoid setState-in-effect and SSR mismatch;
+  // ?status= deep links (Needs Attention counters) win over stored state.
   useEffect(() => {
     let cancelled = false;
     Promise.resolve().then(() => {
-      if (!cancelled) setFilters(loadStoredFilters());
+      if (cancelled) return;
+      const linked = searchParams.get("status");
+      const stored = loadStoredFilters();
+      setFilters(linked ? { ...stored, status: linked } : stored);
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [searchParams]);
   useEffect(() => {
     try {
       window.sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
@@ -736,6 +742,16 @@ export default function TasksPage() {
       {/* Content */}
       {loading ? (
         <SkeletonList rows={6} />
+      ) : tasksQuery.isError ? (
+        <div className="rounded-xl border bg-card px-4 py-10 text-center">
+          <p className="text-sm font-medium">Couldn&apos;t load tasks</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Check your connection — your cached tasks stay visible below while we retry.
+          </p>
+          <Button className="mt-4" variant="outline" size="sm" onClick={() => tasksQuery.refetch()}>
+            Try again
+          </Button>
+        </div>
       ) : sorted.length === 0 ? (
         <EmptyState
           title={tasks.length === 0 ? "No tasks yet" : "No tasks match your filters"}
