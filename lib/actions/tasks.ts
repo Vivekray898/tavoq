@@ -387,9 +387,6 @@ export async function createTaskAction(
         status: validated.data.status || "TODO",
         priority: validated.data.priority || "MEDIUM",
         deadline: validated.data.deadline || null,
-        payout_amount: validated.data.payout_amount || 0,
-        payment_status:
-          (validated.data.payout_amount ?? 0) > 0 ? "PENDING" : "NOT_APPLICABLE",
         created_by: profile.id,
       })
       .select()
@@ -457,7 +454,6 @@ export async function createTaskAction(
           projectName: proj?.name ?? "",
           clientName: client?.name ?? "",
           deadline: task.deadline,
-          payoutAmount: Number(task.payout_amount),
         });
       }
     }
@@ -523,6 +519,9 @@ export async function updateTaskAction(
       .eq("id", id)
       .single();
 
+    // Payout/payment columns are owned by the Payments workspace and
+    // are intentionally NOT touched here — editing a task can no
+    // longer reset a legacy payment status.
     const { data, error } = await supabase
       .from("tasks")
       .update({
@@ -532,8 +531,6 @@ export async function updateTaskAction(
         description: validated.data.description || null,
         priority: validated.data.priority || "MEDIUM",
         deadline: validated.data.deadline || null,
-        payout_amount: validated.data.payout_amount || 0,
-        payment_status: validated.data.payment_status || "NOT_APPLICABLE",
       })
       .eq("id", id)
       .select()

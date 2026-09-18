@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Paperclip, MessageSquare, CheckSquare } from "lucide-react";
-import { cn, formatDeadline, formatCurrency, isOverdue } from "@/lib/utils";
+import { cn, formatDeadline, isOverdue } from "@/lib/utils";
 import { StatusDot, PriorityTag } from "@/components/shared/status-dot";
 import { LABEL_CHIP } from "@/lib/constants";
 import type { TaskStatus } from "@/types/database";
@@ -19,8 +19,6 @@ interface TaskCardProps {
   status?: TaskStatus;
   priority?: string;
   deadline?: string | null;
-  payoutAmount?: number;
-  paymentStatus?: string;
   assignedName?: string | null;
   labels?: TaskCardLabel[];
   subtasksDone?: number;
@@ -32,7 +30,7 @@ interface TaskCardProps {
 }
 
 /**
- * Progressive disclosure (§3.3): title + project + due/payout on the
+ * Progressive disclosure (§3.3): title + project + due date on the
  * card; everything else lives behind the tap.
  */
 export function TaskCard({
@@ -43,8 +41,6 @@ export function TaskCard({
   status,
   priority,
   deadline,
-  payoutAmount,
-  paymentStatus,
   assignedName,
   labels,
   subtasksDone = 0,
@@ -57,13 +53,6 @@ export function TaskCard({
   const overdue = deadline ? isOverdue(deadline) : false;
   const meta: string[] = [];
   if (deadline) meta.push(formatDeadline(deadline));
-  if (payoutAmount && payoutAmount > 0) {
-    meta.push(
-      `${formatCurrency(payoutAmount)}${
-        paymentStatus === "PAID" ? " · Paid" : paymentStatus === "PENDING" ? " · Pending" : ""
-      }`
-    );
-  }
 
   return (
     <Link

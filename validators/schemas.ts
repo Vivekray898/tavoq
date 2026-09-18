@@ -105,13 +105,8 @@ export const taskSchema = z.object({
     .optional(),
   priority: z.enum(["NONE", "LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
   deadline: z.string().optional().or(z.literal("")),
-  payout_amount: z
-    .number()
-    .min(0, "Payout cannot be negative")
-    .optional(),
-  payment_status: z
-    .enum(["NOT_APPLICABLE", "PENDING", "PAID"])
-    .optional(),
+  // Payments live exclusively in the Payments workspace — task
+  // create/edit never sends payout or payment-status fields.
   label_ids: z.array(z.string().uuid()).optional(),
   subtasks: z
     .array(z.object({ title: z.string().min(1, "Subtask title is required") }))

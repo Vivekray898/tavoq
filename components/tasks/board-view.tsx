@@ -26,7 +26,7 @@ import {
   PRIORITY_DOT,
   LABEL_CHIP,
 } from "@/lib/constants";
-import { formatDeadline, formatCurrency, isOverdue, cn, getInitials } from "@/lib/utils";
+import { formatDeadline, isOverdue, cn, getInitials } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { qk } from "@/lib/queries/keys";
 import type { TaskStatus } from "@/types/database";
@@ -283,11 +283,6 @@ function BoardCardContent({
         {task.deadline && (
           <span className={cn(overdue && "font-medium text-destructive")}>
             {formatDeadline(task.deadline)}
-          </span>
-        )}
-        {task.payout_amount > 0 && (
-          <span className="text-emerald-600 dark:text-emerald-400">
-            {formatCurrency(task.payout_amount)}
           </span>
         )}
         <span className="ml-auto flex items-center gap-1.5">

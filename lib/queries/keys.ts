@@ -40,7 +40,10 @@ export const qk = {
   dashboard: (role: "admin" | "employee") => ["dashboard", role] as const,
 
   myEarnings: (weekOffset: number) => ["payments", "mine", weekOffset] as const,
-  adminPayments: () => ["payments", "admin"] as const,
+  /** Admin payout workspace: summary + employees + history. */
+  paymentWorkspace: () => ["payments", "admin"] as const,
+  /** A selected employee's payable tasks (admin payments flow). */
+  payableTasks: (employeeId: string) => ["payments", "payable", employeeId] as const,
 
   labels: () => ["labels"] as const,
   savedFilters: () => ["saved-filters"] as const,

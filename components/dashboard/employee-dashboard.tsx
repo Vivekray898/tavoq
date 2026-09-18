@@ -65,8 +65,6 @@ export function EmployeeDashboard({ firstName }: EmployeeDashboardProps) {
                 status={t.status as never}
                 priority={t.priority}
                 deadline={t.deadline}
-                payoutAmount={t.payout_amount}
-                paymentStatus={t.payment_status}
               />
             ))}
           </div>
@@ -87,7 +85,6 @@ export function EmployeeDashboard({ firstName }: EmployeeDashboardProps) {
                 status={t.status as never}
                 priority={t.priority}
                 deadline={t.deadline}
-                payoutAmount={t.payout_amount}
                 compact
               />
             ))}
@@ -142,13 +139,7 @@ export function EmployeeDashboard({ firstName }: EmployeeDashboardProps) {
                   <p className="truncate text-sm font-medium">{t.title}</p>
                 </div>
                 <span className="shrink-0 text-xs text-muted-foreground">
-                  {t.payment_status === "PAID"
-                    ? "Paid"
-                    : t.payout_amount > 0
-                      ? "Payment pending"
-                      : t.completed_at
-                        ? getRelativeTime(t.completed_at)
-                        : ""}
+                  {t.completed_at ? getRelativeTime(t.completed_at) : ""}
                 </span>
               </Link>
             ))}

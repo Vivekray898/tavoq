@@ -17,10 +17,11 @@ import { formatCurrency, cn } from "@/lib/utils";
 import type { PaymentItem } from "@/lib/actions/payments";
 
 /**
- * §26/§27/§70 — employee earnings, mobile-first.
- * "How much did I earn?" — big numbers, week switcher, day groups.
- * Each viewed week is its own cache entry, so paging back and forth
- * between weeks never refetches (§3).
+ * §12 — employee earnings, mobile-first. Shows BOTH payment kinds
+ * (task-based with task/project context and custom payments with
+ * their description), sourced from the payments table only.
+ * Each viewed week is its own cache entry, so paging between weeks
+ * never refetches (§3).
  */
 export function EmployeePaymentsView() {
   const [weekOffset, setWeekOffset] = useState(0);
@@ -45,7 +46,7 @@ export function EmployeePaymentsView() {
           My earnings
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Payouts recorded for your completed work.
+          Task payouts and custom payments recorded for you.
         </p>
       </div>
 
@@ -147,13 +148,34 @@ export function EmployeePaymentsView() {
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => setDetail(item)}
+                    onClick={() =>
+                      setDetail({
+                        id: item.id,
+                        kind: item.kind,
+                        employee_id: null,
+                        employee_name: null,
+                        task_id: item.kind === "TASK" ? item.id : null,
+                        label: item.label,
+                        project_name: item.project_name,
+                        amount: item.amount,
+                        status: item.status,
+                        paid_at: item.paid_at,
+                        payment_note: item.payment_note,
+                      })
+                    }
                     className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/50"
                   >
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{item.task_title}</p>
+                      <p className="truncate text-sm font-medium">
+                        {item.label}
+                        {item.kind === "CUSTOM" && (
+                          <span className="ml-2 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            Custom
+                          </span>
+                        )}
+                      </p>
                       <p className="truncate text-[13px] text-muted-foreground">
-                        {item.project_name ?? "—"}
+                        {item.project_name ?? (item.kind === "CUSTOM" ? "Custom payment" : "—")}
                       </p>
                     </div>
                     <div className="shrink-0 text-right">
@@ -183,7 +205,7 @@ export function EmployeePaymentsView() {
       {data && data.pending > 0 && isCurrentWeek && (
         <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13px] text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-300">
           {formatCurrency(data.pending)} is awaiting payment across{" "}
-          {data.pendingCount} task{data.pendingCount !== 1 ? "s" : ""}. Once the
+          {data.pendingCount} payment{data.pendingCount !== 1 ? "s" : ""}. Once the
           admin marks them paid, they&apos;ll appear in your history.
         </p>
       )}
@@ -192,9 +214,10 @@ export function EmployeePaymentsView() {
       <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{detail?.task_title}</DialogTitle>
+            <DialogTitle>{detail?.label}</DialogTitle>
             <DialogDescription>
-              {detail?.project_name ?? "Project"}
+              {detail?.project_name ??
+                (detail?.kind === "CUSTOM" ? "Custom payment" : "Task payment")}
             </DialogDescription>
           </DialogHeader>
           {detail && (

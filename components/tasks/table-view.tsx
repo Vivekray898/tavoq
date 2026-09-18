@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Paperclip, MessageSquare } from "lucide-react";
 import { StatusDot } from "@/components/shared/status-dot";
 import { TASK_STATUS_LABELS, PRIORITY_LABELS, LABEL_CHIP } from "@/lib/constants";
-import { formatDeadline, formatCurrency, isOverdue, cn } from "@/lib/utils";
+import { formatDeadline, isOverdue, cn } from "@/lib/utils";
 import type { TaskListItem } from "@/lib/actions/tasks";
 
 const ALL_COLUMNS = [
@@ -14,7 +14,6 @@ const ALL_COLUMNS = [
   { key: "status", label: "Status" },
   { key: "priority", label: "Priority" },
   { key: "due", label: "Due" },
-  { key: "payment", label: "Payment" },
 ] as const;
 
 type ColumnKey = (typeof ALL_COLUMNS)[number]["key"];
@@ -88,24 +87,6 @@ export function TableView({ tasks }: { tasks: TaskListItem[] }) {
                   )}
                 >
                   {t.deadline ? formatDeadline(t.deadline) : "—"}
-                </td>
-                <td className="whitespace-nowrap px-3 py-2.5">
-                  {t.payout_amount > 0 ? (
-                    <span
-                      className={cn(
-                        t.payment_status === "PAID"
-                          ? "text-emerald-600 dark:text-emerald-400"
-                          : t.payment_status === "PENDING"
-                            ? "text-amber-600 dark:text-amber-400"
-                            : "text-muted-foreground"
-                      )}
-                    >
-                      {formatCurrency(t.payout_amount)}
-                      {t.payment_status === "PAID" ? " · Paid" : " · Pending"}
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
                 </td>
                 <td className="px-3 py-2.5 text-xs text-muted-foreground">
                   <span className="flex items-center gap-2">

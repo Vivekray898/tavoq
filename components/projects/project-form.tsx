@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
@@ -45,8 +45,8 @@ export function ProjectForm({ project, mode }: ProjectFormProps) {
   // these entries already; the form reads cache instead of refetching.
   const clientsQuery = useQuery(activeClientsOptions);
   const employeesQuery = useQuery(activeEmployeesOptions);
-  const clients = clientsQuery.data ?? [];
-  const employees = employeesQuery.data ?? [];
+  const clients = useMemo(() => clientsQuery.data ?? [], [clientsQuery.data]);
+  const employees = useMemo(() => employeesQuery.data ?? [], [employeesQuery.data]);
   const loadingData = clientsQuery.isLoading || employeesQuery.isLoading;
 
   const [clientId, setClientId] = useState(project?.client_id ?? "");
@@ -57,6 +57,21 @@ export function ProjectForm({ project, mode }: ProjectFormProps) {
   const [endDate, setEndDate] = useState(project?.end_date ?? "");
   const [memberIds, setMemberIds] = useState<string[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // §1 — value→label maps so Base UI renders the human-readable name
+  // in the trigger (never the raw UUID) after selection or on edit
+  // prefill.
+  const clientItems = useMemo(
+    () => Object.fromEntries(clients.map((c) => [c.id, c.name])),
+    [clients]
+  );
+  const statusItems = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(PROJECT_STATUS_LABELS).filter(([value]) => value !== "ARCHIVED")
+      ),
+    []
+  );
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -123,6 +138,7 @@ export function ProjectForm({ project, mode }: ProjectFormProps) {
         <Field>
           <FieldLabel>Client *</FieldLabel>
           <Select
+            items={clientItems}
             value={clientId}
             onValueChange={(v) => setClientId(v ?? "")}
             disabled={isLoading || loadingData}
@@ -168,7 +184,12 @@ export function ProjectForm({ project, mode }: ProjectFormProps) {
         <div className="grid gap-4 sm:grid-cols-3">
           <Field>
             <FieldLabel>Status</FieldLabel>
-            <Select value={status} onValueChange={(v) => setStatus((v ?? "ACTIVE") as Project["status"])} disabled={isLoading}>
+            <Select
+              items={statusItems}
+              value={status}
+              onValueChange={(v) => setStatus((v ?? "ACTIVE") as Project["status"])}
+              disabled={isLoading}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>

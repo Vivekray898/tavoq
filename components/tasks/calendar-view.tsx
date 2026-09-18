@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TASK_STATUS_DOTS } from "@/lib/constants";
-import { formatCurrency, isOverdue, cn } from "@/lib/utils";
+import { isOverdue, cn } from "@/lib/utils";
 import type { TaskListItem } from "@/lib/actions/tasks";
 
 /**
@@ -126,11 +126,6 @@ export function CalendarView({ tasks }: { tasks: TaskListItem[] }) {
                           )}
                         />
                         <span className="truncate font-medium">{t.title}</span>
-                        {t.payout_amount > 0 && (
-                          <span className="ml-auto shrink-0 text-[9px] text-emerald-600 dark:text-emerald-400">
-                            {formatCurrency(t.payout_amount)}
-                          </span>
-                        )}
                       </Link>
                     );
                   })}

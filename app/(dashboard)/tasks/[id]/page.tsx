@@ -12,7 +12,6 @@ import {
   ExternalLink,
   FileText,
   Globe,
-  IndianRupee,
   Loader2,
   Play,
   RotateCcw,
@@ -54,7 +53,6 @@ import { qk } from "@/lib/queries/keys";
 import { useSession } from "@/components/providers/session-provider";
 import {
   formatDeadline,
-  formatCurrency,
   formatFileSize,
   getInitials,
   isOverdue,
@@ -475,38 +473,6 @@ export default function TaskDetailPage() {
                 {formatDeadline(task.deadline)}
               </span>
             </div>
-            <Separator />
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 text-muted-foreground">
-                <IndianRupee className="size-3.5" /> Payout
-              </span>
-              <span className="font-medium">
-                {task.payout_amount > 0 ? formatCurrency(task.payout_amount) : "—"}
-              </span>
-            </div>
-            {task.payout_amount > 0 && (
-              <>
-                <Separator />
-                <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center justify-between gap-2 text-muted-foreground">
-                    Payment
-                  </span>
-                  <span
-                    className={cn(
-                      "font-medium",
-                      task.payment_status === "PAID" && "text-emerald-600 dark:text-emerald-400",
-                      task.payment_status === "PENDING" && "text-amber-600 dark:text-amber-400"
-                    )}
-                  >
-                    {task.payment_status === "PAID"
-                      ? "Paid"
-                      : task.payment_status === "PENDING"
-                        ? "Pending"
-                        : "—"}
-                  </span>
-                </div>
-              </>
-            )}
           </div>
         </aside>
       </div>

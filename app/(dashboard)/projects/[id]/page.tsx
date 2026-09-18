@@ -358,8 +358,6 @@ export default function ProjectDetailPage() {
                   status={t.status as never}
                   priority={t.priority}
                   deadline={t.deadline}
-                  payoutAmount={t.payout_amount}
-                  paymentStatus={t.payment_status}
                 />
               ))}
             </div>

@@ -26,9 +26,11 @@ import {
 } from "@/lib/actions/employees";
 import {
   getMyEarnings,
-  getAdminPayments,
+  getPaymentWorkspace,
+  getEmployeePayableTasks,
   type EarningsData,
-  type AdminPaymentsData,
+  type PaymentWorkspaceData,
+  type PayableTask,
 } from "@/lib/actions/payments";
 import {
   getAdminDashboard,
@@ -190,15 +192,27 @@ export const myEarningsOptions = (weekOffset: number) =>
     staleTime: 30_000,
   });
 
-export const adminPaymentsOptions = queryOptions<AdminPaymentsData>({
-  queryKey: qk.adminPayments(),
+export const paymentWorkspaceOptions = queryOptions<PaymentWorkspaceData>({
+  queryKey: qk.paymentWorkspace(),
   queryFn: async () => {
-    const res = await getAdminPayments();
+    const res = await getPaymentWorkspace();
     if (!res.success || !res.data) throw new Error(res.error ?? "Failed to load payments");
     return res.data;
   },
   staleTime: 30_000,
 });
+
+export const payableTasksOptions = (employeeId: string) =>
+  queryOptions<PayableTask[]>({
+    queryKey: qk.payableTasks(employeeId),
+    queryFn: async () => {
+      const res = await getEmployeePayableTasks(employeeId);
+      if (!res.success || !res.data) throw new Error(res.error ?? "Failed to load tasks");
+      return res.data;
+    },
+    staleTime: 30_000,
+    enabled: !!employeeId,
+  });
 
 export const labelsOptions = queryOptions<Label[]>({
   queryKey: qk.labels(),

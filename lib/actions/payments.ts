@@ -1,20 +1,30 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { requireAdmin, requireAuth } from "@/lib/auth";
 import { sendEventEmail } from "@/lib/notifications";
 import type { ActionResponse } from "@/types/database";
 
 // ──────────────────────────────────────────────
-// Employee earnings (§26–27, §63–65) — computed from
-// real payments records with IST week boundaries.
+// Dedicated employee payout workspace.
+//
+// Two payment kinds share the `payments` table:
+//   • task-based  → task_id set, employee_id backfilled
+//   • custom      → employee_id + description, no task
+// Payments are managed ONLY here — task/project/client
+// workflows never create or edit them.
 // ──────────────────────────────────────────────
 
+export type PaymentKind = "TASK" | "CUSTOM";
+
+/** Human-readable payment row — never exposes internal IDs. */
 export interface PaymentItem {
   id: string;
-  task_id: string;
-  task_title: string;
+  kind: PaymentKind;
+  employee_id: string | null;
+  employee_name: string | null;
+  task_id: string | null;
+  label: string; // task title or custom description
   project_name: string | null;
   amount: number;
   status: "PENDING" | "PAID";
@@ -22,19 +32,26 @@ export interface PaymentItem {
   payment_note: string | null;
 }
 
-export interface EarningsData {
-  totalPaid: number;
-  thisWeek: number;
+export interface EmployeeSummary {
+  id: string;
+  name: string;
   pending: number;
   pendingCount: number;
-  weekStart: string;
-  weekEnd: string;
-  days: Array<{
-    date: string; // YYYY-MM-DD (IST)
-    label: string; // "Mon, 16 Sep"
-    total: number;
-    items: PaymentItem[];
-  }>;
+  paidTotal: number;
+  paidThisWeek: number;
+  paidThisMonth: number;
+}
+
+export interface PaymentWorkspaceData {
+  summary: {
+    pendingTotal: number;
+    pendingCount: number;
+    paidThisWeek: number;
+    paidThisMonth: number;
+    paidTotal: number;
+  };
+  employees: EmployeeSummary[];
+  history: PaymentItem[];
 }
 
 /** Start of the ISO week containing `now`, in Asia/Kolkata. */
@@ -54,55 +71,64 @@ function istWeekBounds(reference = new Date()): { start: Date; end: Date } {
   return { start, end };
 }
 
-export async function getMyEarnings(
-  weekOffset = 0
-): Promise<ActionResponse<EarningsData>> {
+/** Pull embedded relation rows whether Supabase returns array or object. */
+function one<T>(embedded: T[] | T | null | undefined): T | null {
+  if (!embedded) return null;
+  return Array.isArray(embedded) ? (embedded[0] ?? null) : embedded;
+}
+
+/**
+ * Admin workspace: summary + per-employee rollup + unified history
+ * (task-based + custom). Employees without any payment rows still
+ * appear (from profiles) so the admin can start a payment for them.
+ */
+export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorkspaceData>> {
   try {
-    const profile = await requireAuth();
+    await requireAdmin();
     const supabase = await createClient();
 
-    // Which week are we viewing?
-    const base = new Date();
-    base.setDate(base.getDate() + weekOffset * 7);
-    const { start: weekStart, end: weekEnd } = istWeekBounds(base);
+    const now = new Date();
+    const { start: weekStart } = istWeekBounds(now);
+    const monthStartIso = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) - 5.5 * 60 * 60 * 1000
+    ).toISOString();
 
-    // Everything relevant for this employee, in one query each:
-    // paid records from the payments table (source of truth), and
-    // pending payouts from tasks with payout > 0 not yet paid.
-    const [paidRes, pendingRes] = await Promise.all([
+    const [profilesRes, paymentsRes] = await Promise.all([
+      supabase
+        .from("profiles")
+        .select("id, full_name, status")
+        .eq("role", "EMPLOYEE")
+        .order("full_name", { ascending: true }),
       supabase
         .from("payments")
         .select(
-          "id, task_id, amount, paid_at, payment_note, task:tasks(id, title, project:projects(name))"
+          `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+           employee:profiles!payments_employee_id_fkey(full_name),
+           task:tasks(id, title, project:projects(name))`
         )
-        .eq("task.assigned_to", profile.id)
-        .not("paid_at", "is", null)
-        .order("paid_at", { ascending: false }),
-      supabase
-        .from("tasks")
-        .select(
-          "id, title, payout_amount, project:projects(name), payments(id)"
-        )
-        .eq("assigned_to", profile.id)
-        .eq("payment_status", "PENDING")
-        .gt("payout_amount", 0),
+        .order("created_at", { ascending: false })
+        .limit(500),
     ]);
 
-    if (paidRes.error) {
-      console.error("[getMyEarnings] paid", paidRes.error);
-      return { success: false, error: "Failed to load your payments" };
+    if (profilesRes.error) {
+      console.error("[getPaymentWorkspace] profiles", profilesRes.error);
+      return { success: false, error: "Failed to load employees" };
     }
-    if (pendingRes.error) {
-      console.error("[getMyEarnings] pending", pendingRes.error);
-      return { success: false, error: "Failed to load your payments" };
+    if (paymentsRes.error) {
+      console.error("[getPaymentWorkspace] payments", paymentsRes.error);
+      return { success: false, error: "Failed to load payments" };
     }
 
-    type PaidRow = {
+    type PaymentRow = {
       id: string;
-      task_id: string;
-      amount: number;
+      task_id: string | null;
+      employee_id: string | null;
+      description: string | null;
+      amount: number | string;
       paid_at: string | null;
       payment_note: string | null;
+      created_at: string;
+      employee: { full_name: string }[] | { full_name: string } | null;
       task: {
         id: string;
         title: string;
@@ -110,78 +136,579 @@ export async function getMyEarnings(
       } | null;
     };
 
-    const items: PaymentItem[] = [];
-    let totalPaid = 0;
-    let thisWeek = 0;
-    let pending = 0;
-
-    // Group paid records by IST day
-    const byDay = new Map<string, PaymentItem[]>();
-
-    (paidRes.data ?? []).forEach((raw: unknown) => {
-      const row = raw as PaidRow;
+    const items: PaymentItem[] = (paymentsRes.data ?? []).map((raw: unknown) => {
+      const row = raw as PaymentRow;
       const task = row.task;
-      const project = task?.project
-        ? Array.isArray(task.project)
-          ? task.project[0]
-          : task.project
-        : null;
-
-      const item: PaymentItem = {
+      const project = task ? one(task.project) : null;
+      const employee = one(row.employee);
+      return {
         id: row.id,
+        kind: row.task_id ? "TASK" : "CUSTOM",
+        employee_id: row.employee_id,
+        employee_name: employee?.full_name ?? null,
         task_id: row.task_id,
-        task_title: task?.title ?? "Task",
+        label: row.task_id ? (task?.title ?? "Task") : (row.description ?? "Custom payment"),
         project_name: project?.name ?? null,
         amount: Number(row.amount),
-        status: "PAID",
+        status: row.paid_at ? "PAID" : "PENDING",
         paid_at: row.paid_at,
         payment_note: row.payment_note,
       };
+    });
 
-      totalPaid += item.amount;
-      if (row.paid_at && row.paid_at >= weekStart.toISOString() && row.paid_at < weekEnd.toISOString()) {
-        thisWeek += item.amount;
+    let pendingTotal = 0;
+    let pendingCount = 0;
+    let paidThisWeek = 0;
+    let paidThisMonth = 0;
+    let paidTotal = 0;
+
+    for (const item of items) {
+      if (item.status === "PENDING") {
+        pendingTotal += item.amount;
+        pendingCount += 1;
+        continue;
+      }
+      paidTotal += item.amount;
+      if (item.paid_at) {
+        if (item.paid_at >= weekStart.toISOString()) paidThisWeek += item.amount;
+        if (item.paid_at >= monthStartIso) paidThisMonth += item.amount;
+      }
+    }
+
+    // Per-employee rollup — every employee appears, even with no rows.
+    const byId = new Map<string, EmployeeSummary>();
+    for (const p of profilesRes.data ?? []) {
+      byId.set(p.id, {
+        id: p.id,
+        name: p.full_name,
+        pending: 0,
+        pendingCount: 0,
+        paidTotal: 0,
+        paidThisWeek: 0,
+        paidThisMonth: 0,
+      });
+    }
+    for (const item of items) {
+      const key = item.employee_id;
+      if (!key) continue; // legacy unassigned rows have no employee scope
+      const entry = byId.get(key);
+      if (!entry) continue; // profiles scoped to employees only
+      if (item.status === "PENDING") {
+        entry.pending += item.amount;
+        entry.pendingCount += 1;
+      } else {
+        entry.paidTotal += item.amount;
+        if (item.paid_at) {
+          if (item.paid_at >= weekStart.toISOString()) entry.paidThisWeek += item.amount;
+          if (item.paid_at >= monthStartIso) entry.paidThisMonth += item.amount;
+        }
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        summary: { pendingTotal, pendingCount, paidThisWeek, paidThisMonth, paidTotal },
+        employees: Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name)),
+        history: items,
+      },
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+export interface PayableTask {
+  id: string;
+  title: string;
+  project_name: string | null;
+  status: string;
+  deadline: string | null;
+  payout_amount: number;
+  payment_status: string;
+  /** The task already has a payment record — shown as a guard (§16). */
+  has_payment: boolean;
+}
+
+/**
+ * The selected employee's payable tasks: only their own assigned,
+ * non-completed tasks from active projects, each flagged when a
+ * payment record already exists (duplicate guard).
+ */
+export async function getEmployeePayableTasks(
+  employeeId: string
+): Promise<ActionResponse<PayableTask[]>> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+
+    const [tasksRes, paymentsRes] = await Promise.all([
+      supabase
+        .from("tasks")
+        .select(
+          "id, title, status, deadline, payout_amount, payment_status, project:projects(name, status)"
+        )
+        .eq("assigned_to", employeeId)
+        .neq("status", "COMPLETED")
+        .order("deadline", { ascending: true, nullsFirst: false }),
+      supabase.from("payments").select("task_id").not("task_id", "is", null),
+    ]);
+
+    if (tasksRes.error) {
+      console.error("[getEmployeePayableTasks] tasks", tasksRes.error);
+      return { success: false, error: "Failed to load the employee's tasks" };
+    }
+    if (paymentsRes.error) {
+      console.error("[getEmployeePayableTasks] payments", paymentsRes.error);
+      return { success: false, error: "Failed to load existing payments" };
+    }
+
+    const paidTaskIds = new Set(
+      (paymentsRes.data ?? []).map((p: { task_id: string | null }) => p.task_id)
+    );
+
+    type Row = {
+      id: string;
+      title: string;
+      status: string;
+      deadline: string | null;
+      payout_amount: number;
+      payment_status: string;
+      project: { name: string; status: string }[] | { name: string; status: string } | null;
+    };
+
+    const tasks: PayableTask[] = (tasksRes.data ?? []).map((raw: unknown) => {
+      const row = raw as Row;
+      const project = one(row.project);
+      return {
+        id: row.id,
+        title: row.title,
+        project_name: project?.name ?? null,
+        status: row.status,
+        deadline: row.deadline,
+        payout_amount: Number(row.payout_amount),
+        payment_status: row.payment_status,
+        has_payment: paidTaskIds.has(row.id),
+      };
+    });
+
+    // Active projects first, then on-hold/planning, then others.
+    tasks.sort((a, b) => (a.project_name ?? "").localeCompare(b.project_name ?? ""));
+    return { success: true, data: tasks };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/**
+ * §8 — create one payment per selected task in a single admin action.
+ * Amounts come from the confirmation dialog (default: task payout).
+ * Marks the tasks PAID so legacy task surfaces stay consistent.
+ */
+export async function createPaymentFromTasks(
+  employeeId: string,
+  items: Array<{ task_id: string; amount: number }>,
+  paymentNote?: string
+): Promise<
+  ActionResponse<{
+    created: number;
+    totalAmount: number;
+    employee_name: string;
+  }>
+> {
+  try {
+    const profile = await requireAdmin();
+    if (!employeeId) return { success: false, error: "Select an employee first" };
+    if (!items || items.length === 0) {
+      return { success: false, error: "Select at least one task" };
+    }
+
+    const supabase = await createClient();
+
+    // Authoritative employee record (name for notification/summary).
+    const { data: employee, error: empError } = await supabase
+      .from("profiles")
+      .select("id, full_name, email")
+      .eq("id", employeeId)
+      .single();
+    if (empError || !employee) {
+      return { success: false, error: "Employee not found" };
+    }
+
+    // Tasks must belong to the employee — never trust client amounts/ids.
+    const { data: taskRows, error: taskError } = await supabase
+      .from("tasks")
+      .select("id, title, payout_amount, payment_status")
+      .in(
+        "id",
+        items.map((i) => i.task_id)
+      )
+      .eq("assigned_to", employeeId);
+
+    if (taskError) {
+      console.error("[createPaymentFromTasks] tasks", taskError);
+      return { success: false, error: "Failed to load the selected tasks" };
+    }
+
+    const rows = taskRows ?? [];
+    if (rows.length === 0) {
+      return { success: false, error: "The selected tasks don't belong to this employee" };
+    }
+
+    const amountByTask = new Map(items.map((i) => [i.task_id, Number(i.amount)]));
+
+    // Duplicate guard: tasks that already carry a payment are skipped
+    // unless the caller explicitly re-sends them (business rule §16).
+    const { data: existing } = await supabase
+      .from("payments")
+      .select("id, task_id")
+      .in(
+        "task_id",
+        rows.map((t: { id: string }) => t.id)
+      );
+    const existingByTask = new Map(
+      (existing ?? []).map((p: { task_id: string | null; id: string }) => [p.task_id, p.id])
+    );
+
+    const paidAt = new Date().toISOString();
+    let created = 0;
+    let totalAmount = 0;
+    const createdTaskIds: string[] = [];
+
+    for (const task of rows) {
+      const existingId = existingByTask.get(task.id);
+      const amount = amountByTask.get(task.id) ?? Number(task.payout_amount);
+      if (!(amount > 0)) continue;
+      totalAmount += amount;
+
+      const paymentRow = {
+        employee_id: employeeId,
+        paid_at: paidAt,
+        paid_by: profile.id,
+        payment_note: paymentNote || null,
+        amount,
+      };
+
+      const res = existingId
+        ? await supabase.from("payments").update(paymentRow).eq("id", existingId)
+        : await supabase.from("payments").insert({ task_id: task.id, ...paymentRow });
+
+      if (res.error) {
+        console.error("[createPaymentFromTasks] row", task.id, res.error);
+        continue;
+      }
+      created += 1;
+      createdTaskIds.push(task.id);
+      // Keep legacy task columns consistent with the payment record.
+      await supabase.from("tasks").update({ payment_status: "PAID" }).eq("id", task.id);
+    }
+
+    if (created === 0) {
+      return { success: false, error: "Couldn't record the payment. Please try again." };
+    }
+
+    // One notification + email for the batch.
+    await sendEventEmail("PAYMENT_PAID", {
+      to: employee.email,
+      employeeName: employee.full_name,
+      taskTitle:
+        createdTaskIds.length === 1
+          ? rows.find((t: { id: string }) => t.id === createdTaskIds[0])?.title ??
+            "Selected tasks"
+          : `${createdTaskIds.length} tasks`,
+      amount: totalAmount,
+      paymentNote,
+    });
+
+    return {
+      success: true,
+      data: { created, totalAmount, employee_name: employee.full_name },
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/**
+ * §9 — a payment that isn't tied to any task (bonus, retainer…).
+ * Created as Pending unless the admin marks it paid immediately.
+ */
+export async function createCustomPayment(
+  employeeId: string,
+  amount: number,
+  description: string,
+  markPaidNow: boolean,
+  paymentNote?: string
+): Promise<ActionResponse<PaymentItem>> {
+  try {
+    const profile = await requireAdmin();
+    if (!employeeId) return { success: false, error: "Select an employee" };
+    if (!(amount > 0)) return { success: false, error: "Amount must be greater than zero" };
+    if (!description.trim()) {
+      return { success: false, error: "Add a short description" };
+    }
+
+    const supabase = await createClient();
+
+    const { data: employee, error: empError } = await supabase
+      .from("profiles")
+      .select("id, full_name, email")
+      .eq("id", employeeId)
+      .single();
+    if (empError || !employee) {
+      return { success: false, error: "Employee not found" };
+    }
+
+    const { data, error } = await supabase
+      .from("payments")
+      .insert({
+        employee_id: employeeId,
+        description: description.trim(),
+        amount,
+        paid_at: markPaidNow ? new Date().toISOString() : null,
+        paid_by: markPaidNow ? profile.id : null,
+        payment_note: paymentNote || null,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("[createCustomPayment]", error);
+      return { success: false, error: "Failed to create the payment" };
+    }
+
+    if (markPaidNow) {
+      await sendEventEmail("PAYMENT_PAID", {
+        to: employee.email,
+        employeeName: employee.full_name,
+        taskTitle: description.trim(),
+        amount,
+        paymentNote,
+      });
+    }
+
+    return {
+      success: true,
+      data: {
+        id: (data as { id: string }).id,
+        kind: "CUSTOM",
+        employee_id: employeeId,
+        employee_name: employee.full_name,
+        task_id: null,
+        label: description.trim(),
+        project_name: null,
+        amount,
+        status: markPaidNow ? "PAID" : "PENDING",
+        paid_at: markPaidNow ? new Date().toISOString() : null,
+        payment_note: paymentNote || null,
+      },
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/** §11 — mark a pending payment (custom or legacy) as paid. */
+export async function markPaymentPaid(
+  paymentId: string,
+  paymentNote?: string
+): Promise<ActionResponse<PaymentItem>> {
+  try {
+    const profile = await requireAdmin();
+    const supabase = await createClient();
+
+    const { data: row, error } = await supabase
+      .from("payments")
+      .select(
+        `id, task_id, employee_id, description, amount, paid_at, payment_note,
+         employee:profiles!payments_employee_id_fkey(full_name, email),
+         task:tasks(id, title, assigned_to)`
+      )
+      .eq("id", paymentId)
+      .single();
+
+    if (error || !row) {
+      console.error("[markPaymentPaid] load", error);
+      return { success: false, error: "Payment not found" };
+    }
+
+    const paidRow = row as unknown as {
+      id: string;
+      task_id: string | null;
+      employee_id: string | null;
+      description: string | null;
+      amount: number | string;
+      paid_at: string | null;
+      payment_note: string | null;
+      employee: { full_name: string; email: string }[] | { full_name: string; email: string } | null;
+      task: { id: string; title: string; assigned_to: string | null } | null;
+    };
+
+    const paidAt = new Date().toISOString();
+    const { error: updateError } = await supabase
+      .from("payments")
+      .update({ paid_at: paidAt, paid_by: profile.id, payment_note: paymentNote || paidRow.payment_note })
+      .eq("id", paymentId);
+
+    if (updateError) {
+      console.error("[markPaymentPaid] update", updateError);
+      return { success: false, error: "Couldn't mark the payment as paid" };
+    }
+
+    const employee = one(paidRow.employee);
+
+    if (employee?.email) {
+      void sendEventEmail("PAYMENT_PAID", {
+        to: employee.email,
+        employeeName: employee.full_name,
+        taskTitle: paidRow.task?.title ?? paidRow.description ?? "Payment",
+        amount: Number(paidRow.amount),
+        paymentNote,
+      });
+    }
+
+    return {
+      success: true,
+      data: {
+        id: paidRow.id,
+        kind: paidRow.task_id ? "TASK" : "CUSTOM",
+        employee_id: paidRow.employee_id,
+        employee_name: employee?.full_name ?? null,
+        task_id: paidRow.task_id,
+        label: paidRow.task_id ? (paidRow.task?.title ?? "Task") : (paidRow.description ?? "Custom payment"),
+        project_name: null,
+        amount: Number(paidRow.amount),
+        status: "PAID",
+        paid_at: paidAt,
+        payment_note: paymentNote || paidRow.payment_note,
+      },
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+// ──────────────────────────────────────────────
+// Employee earnings (§12) — sourced ONLY from the
+// payments table (RLS: employee_id = auth.uid() or
+// own-task rows). Task-based + custom both appear.
+// ──────────────────────────────────────────────
+
+export interface EarningsData {
+  totalPaid: number;
+  thisWeek: number;
+  pending: number;
+  pendingCount: number;
+  weekStart: string;
+  weekEnd: string;
+  days: Array<{
+    date: string; // YYYY-MM-DD (IST)
+    label: string; // "Mon, 16 Sep"
+    total: number;
+    items: Array<{
+      id: string;
+      label: string;
+      kind: PaymentKind;
+      project_name: string | null;
+      amount: number;
+      status: "PENDING" | "PAID";
+      paid_at: string | null;
+      payment_note: string | null;
+    }>;
+  }>;
+}
+
+export async function getMyEarnings(
+  weekOffset = 0
+): Promise<ActionResponse<EarningsData>> {
+  try {
+    await requireAuth();
+    const supabase = await createClient();
+
+    const base = new Date();
+    base.setDate(base.getDate() + weekOffset * 7);
+    const { start: weekStart, end: weekEnd } = istWeekBounds(base);
+
+    const { data, error } = await supabase
+      .from("payments")
+      .select(
+        `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+         task:tasks(id, title, project:projects(name))`
+      )
+      .order("created_at", { ascending: false })
+      .limit(500);
+
+    if (error) {
+      console.error("[getMyEarnings]", error);
+      return { success: false, error: "Failed to load your payments" };
+    }
+
+    type Row = {
+      id: string;
+      task_id: string | null;
+      employee_id: string | null;
+      description: string | null;
+      amount: number | string;
+      paid_at: string | null;
+      payment_note: string | null;
+      created_at: string;
+      task: {
+        id: string;
+        title: string;
+        project: { name: string }[] | { name: string } | null;
+      } | null;
+    };
+
+    let totalPaid = 0;
+    let thisWeek = 0;
+    let pending = 0;
+    let pendingCount = 0;
+
+    const byDay = new Map<string, EarningsData["days"][number]["items"]>();
+    const weekStartIso = weekStart.toISOString();
+    const weekEndIso = weekEnd.toISOString();
+
+    for (const raw of data ?? []) {
+      const row = raw as unknown as Row;
+      const task = row.task;
+      const project = task ? one(task.project) : null;
+      const kind: PaymentKind = row.task_id ? "TASK" : "CUSTOM";
+      const label = row.task_id ? (task?.title ?? "Task") : (row.description ?? "Custom payment");
+      const amount = Number(row.amount);
+      const status: "PENDING" | "PAID" = row.paid_at ? "PAID" : "PENDING";
+
+      if (status === "PAID") {
+        totalPaid += amount;
+        if (row.paid_at && row.paid_at >= weekStartIso && row.paid_at < weekEndIso) {
+          thisWeek += amount;
+        }
+      } else {
+        pending += amount;
+        pendingCount += 1;
+      }
+
+      // Bucket PAID rows into the viewed week by paid date; pending
+      // rows have no date, so they're listed under the viewed week's
+      // first day only when there are no paid items at all (kept in
+      // the summary instead — simpler and truthful).
+      if (status === "PAID" && row.paid_at && row.paid_at >= weekStartIso && row.paid_at < weekEndIso) {
         const istDate = new Date(new Date(row.paid_at).getTime() + 5.5 * 60 * 60 * 1000);
         const dayKey = istDate.toISOString().slice(0, 10);
         const list = byDay.get(dayKey) ?? [];
-        list.push(item);
+        list.push({
+          id: row.id,
+          label,
+          kind,
+          project_name: project?.name ?? null,
+          amount,
+          status,
+          paid_at: row.paid_at,
+          payment_note: row.payment_note,
+        });
         byDay.set(dayKey, list);
       }
-      items.push(item);
-    });
+    }
 
-    (pendingRes.data ?? []).forEach(
-      (raw: {
-        id: string;
-        title: string;
-        payout_amount: number;
-        project: { name: string }[] | { name: string } | null;
-      }) => {
-        const project = raw.project
-          ? Array.isArray(raw.project)
-            ? raw.project[0]
-            : raw.project
-          : null;
-        pending += Number(raw.payout_amount);
-
-        // Pending items appear in the current week's "today" bucket
-        // only if they were completed recently — keep grouping simple:
-        // show them under the day they were completed, else ungrouped.
-        const item: PaymentItem = {
-          id: `pending-${raw.id}`,
-          task_id: raw.id,
-          task_title: raw.title,
-          project_name: project?.name ?? null,
-          amount: Number(raw.payout_amount),
-          status: "PENDING",
-          paid_at: null,
-          payment_note: null,
-        };
-        items.push(item);
-      }
-    );
-
-    // Build the day list for the viewed week
     const days: EarningsData["days"] = [];
     for (let i = 0; i < 7; i++) {
       const dayStart = new Date(weekStart.getTime() + i * 24 * 60 * 60 * 1000);
@@ -208,376 +735,10 @@ export async function getMyEarnings(
         totalPaid,
         thisWeek,
         pending,
-        pendingCount: items.filter((i) => i.status === "PENDING").length,
+        pendingCount,
         weekStart: weekStart.toISOString(),
         weekEnd: weekEnd.toISOString(),
         days,
-      },
-    };
-  } catch {
-    return { success: false, error: "Unauthorized" };
-  }
-}
-
-// ──────────────────────────────────────────────
-// Admin payout workspace (§30–37, §66)
-// ──────────────────────────────────────────────
-
-export interface AdminPaymentsData {
-  summary: {
-    pendingTotal: number;
-    pendingCount: number;
-    paidThisWeek: number;
-    paidThisMonth: number;
-    paidTotal: number;
-  };
-  pending: Array<{
-    id: string; // task id
-    task_id: string;
-    task_title: string;
-    employee_id: string;
-    employee_name: string;
-    project_name: string | null;
-    amount: number;
-    completed_at: string | null;
-  }>;
-  paid: Array<{
-    id: string;
-    task_id: string;
-    task_title: string;
-    employee_id: string | null;
-    employee_name: string | null;
-    project_name: string | null;
-    amount: number;
-    paid_at: string | null;
-    payment_note: string | null;
-  }>;
-}
-
-export async function getAdminPayments(): Promise<ActionResponse<AdminPaymentsData>> {
-  try {
-    await requireAdmin();
-    const supabase = await createClient();
-
-    const now = new Date();
-    const { start: weekStart } = istWeekBounds(now);
-    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const monthStartIso = new Date(monthStart.getTime() - 5.5 * 60 * 60 * 1000).toISOString();
-
-    const [pendingRes, paidRes] = await Promise.all([
-      supabase
-        .from("tasks")
-        .select(
-          "id, title, payout_amount, completed_at, assigned_to, assigned_user:profiles!tasks_assigned_to_fkey(full_name), project:projects(name)"
-        )
-        .eq("payment_status", "PENDING")
-        .gt("payout_amount", 0)
-        .order("completed_at", { ascending: true, nullsFirst: false }),
-      supabase
-        .from("payments")
-        .select(
-          "id, task_id, amount, paid_at, payment_note, task:tasks(id, title, assigned_to, project:projects(name), assigned_user:profiles!tasks_assigned_to_fkey(full_name))"
-        )
-        .not("paid_at", "is", null)
-        .order("paid_at", { ascending: false })
-        .limit(500),
-    ]);
-
-    if (pendingRes.error) {
-      console.error("[getAdminPayments] pending", pendingRes.error);
-      return { success: false, error: "Failed to load pending payouts" };
-    }
-    if (paidRes.error) {
-      console.error("[getAdminPayments] paid", paidRes.error);
-      return { success: false, error: "Failed to load payments" };
-    }
-
-    const pending: AdminPaymentsData["pending"] = [];
-    let pendingTotal = 0;
-
-    (pendingRes.data ?? []).forEach(
-      (raw: {
-        id: string;
-        title: string;
-        payout_amount: number;
-        completed_at: string | null;
-        assigned_to: string | null;
-        assigned_user: { full_name: string }[] | { full_name: string } | null;
-        project: { name: string }[] | { name: string } | null;
-      }) => {
-        const user = raw.assigned_user
-          ? Array.isArray(raw.assigned_user)
-            ? raw.assigned_user[0]
-            : raw.assigned_user
-          : null;
-        const project = raw.project
-          ? Array.isArray(raw.project)
-            ? raw.project[0]
-            : raw.project
-          : null;
-        pendingTotal += Number(raw.payout_amount);
-        pending.push({
-          id: raw.id,
-          task_id: raw.id,
-          task_title: raw.title,
-          employee_id: raw.assigned_to ?? "",
-          employee_name: user?.full_name ?? "Unassigned",
-          project_name: project?.name ?? null,
-          amount: Number(raw.payout_amount),
-          completed_at: raw.completed_at,
-        });
-      }
-    );
-
-    const paid: AdminPaymentsData["paid"] = [];
-    let paidThisWeek = 0;
-    let paidThisMonth = 0;
-    let paidTotal = 0;
-
-    (paidRes.data ?? []).forEach((raw: unknown) => {
-      const row = raw as {
-        id: string;
-        task_id: string;
-        amount: number;
-        paid_at: string | null;
-        payment_note: string | null;
-        task: {
-          id: string;
-          title: string;
-          assigned_to: string | null;
-          project: { name: string }[] | { name: string } | null;
-          assigned_user: { full_name: string }[] | { full_name: string } | null;
-        } | null;
-      };
-      const task = row.task;
-      const user = task?.assigned_user
-        ? Array.isArray(task.assigned_user)
-          ? task.assigned_user[0]
-          : task.assigned_user
-        : null;
-      const project = task?.project
-        ? Array.isArray(task.project)
-          ? task.project[0]
-          : task.project
-        : null;
-
-      const amount = Number(row.amount);
-      paidTotal += amount;
-      if (row.paid_at) {
-        if (row.paid_at >= weekStart.toISOString()) paidThisWeek += amount;
-        if (row.paid_at >= monthStartIso) paidThisMonth += amount;
-      }
-
-      paid.push({
-        id: row.id,
-        task_id: row.task_id,
-        task_title: task?.title ?? "Task",
-        employee_id: task?.assigned_to ?? null,
-        employee_name: user?.full_name ?? null,
-        project_name: project?.name ?? null,
-        amount,
-        paid_at: row.paid_at,
-        payment_note: row.payment_note,
-      });
-    });
-
-    return {
-      success: true,
-      data: {
-        summary: {
-          pendingTotal,
-          pendingCount: pending.length,
-          paidThisWeek,
-          paidThisMonth,
-          paidTotal,
-        },
-        pending,
-        paid,
-      },
-    };
-  } catch {
-    return { success: false, error: "Unauthorized" };
-  }
-}
-
-/**
- * §35/§67 — bulk mark-as-paid. Atomic per batch: if any update fails,
- * we report which ones succeeded so the admin is never misled.
- */
-export async function markPaymentsPaidBatch(
-  taskIds: string[],
-  paymentNote?: string
-): Promise<
-  ActionResponse<{
-    marked: number;
-    totalAmount: number;
-    byEmployee: Array<{ name: string; amount: number; count: number }>;
-  }>
-> {
-  try {
-    const profile = await requireAdmin();
-
-    if (taskIds.length === 0) {
-      return { success: false, error: "No payments selected" };
-    }
-
-    const supabase = await createClient();
-    const { data: tasks, error } = await supabase
-      .from("tasks")
-      .select("id, title, payout_amount, assigned_to, payment_status, assigned_user:profiles!tasks_assigned_to_fkey(full_name, email)")
-      .in("id", taskIds);
-
-    if (error) {
-      console.error("[markPaymentsPaidBatch] load", error);
-      return { success: false, error: "Failed to load the selected tasks" };
-    }
-
-    const rows = (tasks ?? []) as Array<{
-      id: string;
-      title: string;
-      payout_amount: number;
-      assigned_to: string | null;
-      payment_status: string;
-      assigned_user: { full_name: string; email: string }[] | { full_name: string; email: string } | null;
-    }>;
-
-    const payable = rows.filter(
-      (t) => t.payment_status !== "PAID" && Number(t.payout_amount) > 0
-    );
-
-    if (payable.length === 0) {
-      return { success: false, error: "The selected tasks have no pending payouts" };
-    }
-
-    const paidAt = new Date().toISOString();
-    let totalAmount = 0;
-    const marked: string[] = [];
-
-    // Upsert payment rows
-    const { data: existing } = await supabase
-      .from("payments")
-      .select("id, task_id")
-      .in("task_id", payable.map((t) => t.id));
-
-    const existingByTask = new Map((existing ?? []).map((p: { task_id: string; id: string }) => [p.task_id, p.id]));
-
-    for (const task of payable) {
-      const amount = Number(task.payout_amount);
-      totalAmount += amount;
-
-      const paymentRow = {
-        paid_at: paidAt,
-        paid_by: profile.id,
-        payment_note: paymentNote || null,
-      };
-
-      const existingId = existingByTask.get(task.id);
-      const res = existingId
-        ? await supabase.from("payments").update({ ...paymentRow, amount }).eq("id", existingId)
-        : await supabase
-            .from("payments")
-            .insert({ task_id: task.id, amount, ...paymentRow });
-
-      if (!res.error) {
-        marked.push(task.id);
-        await supabase.from("tasks").update({ payment_status: "PAID" }).eq("id", task.id);
-      } else {
-        console.error("[markPaymentsPaidBatch] row", task.id, res.error);
-      }
-    }
-
-    if (marked.length === 0) {
-      return { success: false, error: "Couldn't mark the payments as paid. Please try again." };
-    }
-
-    // Group for the summary + notifications
-    const byEmployee = new Map<string, { amount: number; count: number }>();
-    for (const task of payable) {
-      if (!marked.includes(task.id)) continue;
-      const user = task.assigned_user
-        ? Array.isArray(task.assigned_user)
-          ? task.assigned_user[0]
-          : task.assigned_user
-        : null;
-      const key = user?.full_name ?? "Unassigned";
-      const entry = byEmployee.get(key) ?? { amount: 0, count: 0 };
-      entry.amount += Number(task.payout_amount);
-      entry.count += 1;
-      byEmployee.set(key, entry);
-    }
-
-    // One summary notification per employee (§68)
-    const admin = createAdminClient();
-    const notifications: Array<{
-      userId: string;
-      type: "PAYMENT_PAID";
-      title: string;
-      message: string;
-      referenceType: string;
-      referenceId: string;
-    }> = [];
-
-    for (const task of payable) {
-      if (!marked.includes(task.id) || !task.assigned_to) continue;
-      const user = task.assigned_user
-        ? Array.isArray(task.assigned_user)
-          ? task.assigned_user[0]
-          : task.assigned_user
-        : null;
-
-      notifications.push({
-        userId: task.assigned_to,
-        type: "PAYMENT_PAID",
-        title: "Payment received",
-        message: `₹${Number(task.payout_amount).toLocaleString("en-IN")} for "${task.title}" has been marked as paid`,
-        referenceType: "payment",
-        referenceId: task.id,
-      });
-
-      if (user?.email) {
-        void sendEventEmail("PAYMENT_PAID", {
-          to: user.email,
-          employeeName: user.full_name,
-          taskTitle: task.title,
-          amount: Number(task.payout_amount),
-          paymentNote,
-        });
-      }
-    }
-
-    if (notifications.length > 0) {
-      await admin.from("notifications").insert(
-        notifications.map((n) => ({
-          user_id: n.userId,
-          type: n.type,
-          title: n.title,
-          message: n.message,
-          reference_type: n.referenceType,
-          reference_id: n.referenceId,
-          read: false,
-        }))
-      );
-    }
-    void admin;
-
-    const partial = marked.length < payable.length;
-    return {
-      success: true,
-      data: {
-        marked: marked.length,
-        totalAmount,
-        byEmployee: Array.from(byEmployee.entries()).map(([name, v]) => ({
-          name,
-          amount: v.amount,
-          count: v.count,
-        })),
-        ...(partial
-          ? { warning: `${payable.length - marked.length} payment(s) could not be marked` }
-          : {}),
-      } as {
-        marked: number;
-        totalAmount: number;
-        byEmployee: Array<{ name: string; amount: number; count: number }>;
       },
     };
   } catch {

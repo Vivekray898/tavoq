@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, Plus, X } from "lucide-react";
@@ -48,9 +48,20 @@ export function QuickAddTask({ projectId, className, onCreated }: QuickAddTaskPr
     ...activeEmployeesOptions,
     enabled: open,
   });
-  const projects = projectsQuery.data ?? [];
-  const employees = employeesQuery.data ?? [];
+  const projects = useMemo(() => projectsQuery.data ?? [], [projectsQuery.data]);
+  const employees = useMemo(() => employeesQuery.data ?? [], [employeesQuery.data]);
   const loadingOptions = open && (projectsQuery.isLoading || employeesQuery.isLoading);
+
+  // §1 — value→label maps: Base UI renders the selected item's label in
+  // the trigger instead of the raw UUID.
+  const projectItems = useMemo(
+    () => Object.fromEntries(projects.map((p) => [p.id, p.client_name ? `${p.client_name} — ${p.name}` : p.name])),
+    [projects]
+  );
+  const employeeItems = useMemo(
+    () => Object.fromEntries(employees.map((e) => [e.id, e.full_name])),
+    [employees]
+  );
 
   function openComposer() {
     setOpen(true);
@@ -147,7 +158,11 @@ export function QuickAddTask({ projectId, className, onCreated }: QuickAddTaskPr
           <Loader2 className="size-4 animate-spin text-muted-foreground" />
         ) : (
           <>
-            <Select value={selectedProject || undefined} onValueChange={(v) => setSelectedProject(v ?? "")}>
+            <Select
+              items={projectItems}
+              value={selectedProject || undefined}
+              onValueChange={(v) => setSelectedProject(v ?? "")}
+            >
               <SelectTrigger size="sm" className="h-7 w-auto min-w-40 text-xs">
                 <SelectValue placeholder="Project" />
               </SelectTrigger>
@@ -161,7 +176,11 @@ export function QuickAddTask({ projectId, className, onCreated }: QuickAddTaskPr
               </SelectContent>
             </Select>
 
-            <Select value={selectedEmployee || undefined} onValueChange={(v) => setSelectedEmployee(v ?? "")}>
+            <Select
+              items={{ none: "Unassigned", ...employeeItems }}
+              value={selectedEmployee || undefined}
+              onValueChange={(v) => setSelectedEmployee(v ?? "")}
+            >
               <SelectTrigger size="sm" className="h-7 w-auto min-w-32 text-xs">
                 <SelectValue placeholder="Assignee" />
               </SelectTrigger>
@@ -196,7 +215,7 @@ export function QuickAddTask({ projectId, className, onCreated }: QuickAddTaskPr
         </div>
       </div>      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
       <p className="mt-2 text-[11px] text-muted-foreground">
-        Need payout, priority or instructions?{" "}
+        Need priority, labels or instructions?{" "}
         <Link href="/tasks/new" className="underline hover:text-foreground">
           Use the full form
         </Link>

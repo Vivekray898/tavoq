@@ -405,8 +405,6 @@ export default function TasksPage() {
               status={t.status}
               priority={t.priority}
               deadline={t.deadline}
-              payoutAmount={t.payout_amount}
-              paymentStatus={t.payment_status}
               assignedName={t.assigned_name}
               labels={t.labels}
               subtasksDone={t.subtasks_done}

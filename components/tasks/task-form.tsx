@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, ChevronDown } from "lucide-react";
@@ -76,9 +76,9 @@ export function TaskForm({ task, mode }: TaskFormProps) {
   const projectsQuery = useQuery(projectsForTaskOptions);
   const employeesQuery = useQuery(activeEmployeesOptions);
   const labelsQuery = useQuery(labelsOptions);
-  const projects = projectsQuery.data ?? [];
-  const employees = employeesQuery.data ?? [];
-  const labels = labelsQuery.data ?? [];
+  const projects = useMemo(() => projectsQuery.data ?? [], [projectsQuery.data]);
+  const employees = useMemo(() => employeesQuery.data ?? [], [employeesQuery.data]);
+  const labels = useMemo(() => labelsQuery.data ?? [], [labelsQuery.data]);
   const loadingData = projectsQuery.isLoading || employeesQuery.isLoading;
 
   const [moreOpen, setMoreOpen] = useState(mode === "edit");
@@ -92,19 +92,31 @@ export function TaskForm({ task, mode }: TaskFormProps) {
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
   const [priority, setPriority] = useState(task?.priority ?? "MEDIUM");
-  const [payout, setPayout] = useState(
-    task?.payout_amount ? String(Number(task.payout_amount)) : ""
-  );
   const initial = fromISTInstant(task?.deadline ?? null);
   const [dueDate, setDueDate] = useState(initial.date);
   const [dueTime, setDueTime] = useState(initial.time || "18:00");
-  const [paymentStatus, setPaymentStatus] = useState(task?.payment_status ?? "NOT_APPLICABLE");
   const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>(
     // Edit mode: prefill from existing labels if the caller provided them
     []
   );
   const [subtaskLines, setSubtaskLines] = useState<string[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
+
+  // §1 — value→label maps so Base UI renders the human-readable name
+  // in the trigger (never the raw UUID) after selection, on edit-mode
+  // prefill, and after validation errors or failed submissions.
+  const projectItems = useMemo(
+    () => Object.fromEntries(projects.map((p) => [p.id, p.client_name ? `${p.client_name} — ${p.name}` : p.name])),
+    [projects]
+  );
+  const employeeItems = useMemo(
+    () => Object.fromEntries(employees.map((e) => [e.id, e.full_name])),
+    [employees]
+  );
+  const priorityItems = useMemo(
+    () => ({ ...PRIORITY_LABELS }) as Record<string, string>,
+    []
+  );
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -122,8 +134,6 @@ export function TaskForm({ task, mode }: TaskFormProps) {
       description,
       priority: priority as TaskInput["priority"],
       deadline,
-      payout_amount: payout ? Number(payout) : 0,
-      payment_status: paymentStatus,
       label_ids: selectedLabelIds.length > 0 ? selectedLabelIds : undefined,
       subtasks: subtasks.length > 0 ? subtasks : undefined,
       ...(mode === "edit" ? { status: task?.status } : {}),
@@ -184,6 +194,7 @@ export function TaskForm({ task, mode }: TaskFormProps) {
           <Field>
             <FieldLabel>Project *</FieldLabel>
             <Select
+              items={projectItems}
               value={projectId}
               onValueChange={(v) => setProjectId(v ?? "")}
               disabled={isLoading || loadingData}
@@ -205,6 +216,7 @@ export function TaskForm({ task, mode }: TaskFormProps) {
           <Field>
             <FieldLabel>Assign to</FieldLabel>
             <Select
+              items={employeeItems}
               value={assignedTo}
               onValueChange={(v) => setAssignedTo(v ?? "")}
               disabled={isLoading || loadingData}
@@ -249,6 +261,7 @@ export function TaskForm({ task, mode }: TaskFormProps) {
         <div className="grid gap-4 sm:grid-cols-2">        <Field>
           <FieldLabel>Priority</FieldLabel>
             <Select
+              items={priorityItems}
               value={priority}
               onValueChange={(v) => setPriority(((v ?? "MEDIUM") as TaskInput["priority"]) ?? "MEDIUM")}
               disabled={isLoading}
@@ -266,19 +279,6 @@ export function TaskForm({ task, mode }: TaskFormProps) {
             </Select>
           </Field>
 
-          <Field>
-            <FieldLabel htmlFor="payout">Payout (₹)</FieldLabel>
-            <Input
-              id="payout"
-              type="number"
-              min="0"
-              step="50"
-              placeholder="0"
-              value={payout}
-              onChange={(e) => setPayout(e.target.value)}
-              disabled={isLoading}
-            />
-          </Field>
         </div>
 
         <Field>
@@ -351,27 +351,6 @@ export function TaskForm({ task, mode }: TaskFormProps) {
             />
             <p className="text-xs text-muted-foreground">
               Creates a checklist on the task your teammate can tick off.
-            </p>
-          </Field>
-
-          <Field>
-            <FieldLabel>Payment status</FieldLabel>
-            <Select
-              value={paymentStatus}
-              onValueChange={(v) => setPaymentStatus(((v ?? "NOT_APPLICABLE") as TaskInput["payment_status"]) ?? "NOT_APPLICABLE")}
-              disabled={isLoading}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="NOT_APPLICABLE">No payout</SelectItem>
-                <SelectItem value="PENDING">Payment pending</SelectItem>
-                <SelectItem value="PAID">Paid</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Tasks with a payout are automatically marked pending payment on completion.
             </p>
           </Field>
         </div>
