@@ -18,6 +18,7 @@
  *   ['payments', 'mine', weekOffset]
  *   ['payments', 'admin']
  *   ['labels'], ['saved-filters'], ['activity', scope, id, limit]
+ *   ['profile', 'memo', updatedAt]   — profile memo cache
  */
 export const qk = {
   tasks: () => ["tasks"] as const,
@@ -43,6 +44,13 @@ export const qk = {
 
   labels: () => ["labels"] as const,
   savedFilters: () => ["saved-filters"] as const,
+
+  /** ACTIVE projects (+client names) for task create/edit dropdowns. */
+  projectsForTask: () => ["projects", "for-task"] as const,
+  /** ACTIVE clients for project create/edit dropdowns. */
+  activeClients: () => ["clients", "active"] as const,
+  /** Agency settings (key/value map) for the settings form. */
+  settings: () => ["settings"] as const,
 
   taskActivity: (taskId: string, limit: number) =>
     ["activity", "task", taskId, limit] as const,

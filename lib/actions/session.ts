@@ -15,3 +15,16 @@ export async function getMyRole(): Promise<ActionResponse<Pick<Profile, "role">>
     return { success: false, error: "Unauthorized" };
   }
 }
+
+/**
+ * Fetch the caller's full profile. RLS-scoped to the calling user —
+ * no id parameter to abuse. Used by the profile memo cache.
+ */
+export async function getMyProfile(): Promise<ActionResponse<Profile>> {
+  try {
+    const profile = await requireAuth();
+    return { success: true, data: profile };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}

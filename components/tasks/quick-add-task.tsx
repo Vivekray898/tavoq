@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
 import { Loader2, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,8 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createTaskAction } from "@/lib/actions/tasks";
-import { getProjectsForTask } from "@/lib/actions/tasks";
-import { getActiveEmployees } from "@/lib/actions/employees";
+import { projectsForTaskOptions, activeEmployeesOptions } from "@/lib/queries/options";
 import { cn } from "@/lib/utils";
 import type { TaskListItem } from "@/lib/actions/tasks";
 
@@ -25,17 +25,6 @@ interface QuickAddTaskProps {
   onCreated?: (task: TaskListItem) => void;
 }
 
-interface ProjectOption {
-  id: string;
-  name: string;
-  client_name: string;
-}
-
-interface EmployeeOption {
-  id: string;
-  full_name: string;
-}
-
 /**
  * §10 — ultra-fast task creation: title, project, assignee, due date.
  * Everything else lives in the full form behind "More options".
@@ -44,26 +33,27 @@ export function QuickAddTask({ projectId, className, onCreated }: QuickAddTaskPr
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
-  const [projects, setProjects] = useState<ProjectOption[]>([]);
-  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [selectedProject, setSelectedProject] = useState(projectId ?? "");
   const [selectedEmployee, setSelectedEmployee] = useState("");
-  const [loadingOptions, setLoadingOptions] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function openComposer() {
+  // Dropdown options come from the shared cache — the tasks page already
+  // holds both, so opening the composer costs zero requests.
+  const projectsQuery = useQuery({
+    ...projectsForTaskOptions,
+    enabled: open, // fetch lazily, once, on first open
+  });
+  const employeesQuery = useQuery({
+    ...activeEmployeesOptions,
+    enabled: open,
+  });
+  const projects = projectsQuery.data ?? [];
+  const employees = employeesQuery.data ?? [];
+  const loadingOptions = open && (projectsQuery.isLoading || employeesQuery.isLoading);
+
+  function openComposer() {
     setOpen(true);
-    if (!projects.length || !employees.length) {
-      setLoadingOptions(true);
-      const [projRes, empRes] = await Promise.all([
-        getProjectsForTask(),
-        getActiveEmployees(),
-      ]);
-      if (projRes.success && projRes.data) setProjects(projRes.data);
-      if (empRes.success && empRes.data) setEmployees(empRes.data);
-      setLoadingOptions(false);
-    }
   }
 
   function close() {

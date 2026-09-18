@@ -39,7 +39,10 @@ import {
 import { getLabels, getSavedFilters, type SavedFilterRow } from "@/lib/actions/task-extras";
 import { getNotifications } from "@/lib/actions/notifications";
 import { getTaskActivity, getProjectActivity, type ActivityItem } from "@/lib/actions/activity";
-import type { Notification, Label } from "@/types/database";
+import { getProjectsForTask } from "@/lib/actions/tasks";
+import { getMyProfile } from "@/lib/actions/session";
+import { getActiveClients } from "@/lib/actions/clients";
+import type { Notification, Label, Profile } from "@/types/database";
 import { qk } from "@/lib/queries/keys";
 
 // ──────────────────────────────────────────────
@@ -213,6 +216,64 @@ export const savedFiltersOptions = queryOptions<SavedFilterRow[]>({
     const res = await getSavedFilters();
     if (!res.success || !res.data) throw new Error(res.error ?? "Failed to load saved views");
     return res.data;
+  },
+  staleTime: 300_000,
+});
+
+/**
+ * Profile memo — server identity gate keyed by updated_at. Navigating to
+ * /profile re-serves this from cache; edits write here + patch session.
+ */
+export const profileMemoOptions = (updatedAt: string) =>
+  queryOptions<Profile>({
+    queryKey: ["profile", "memo", updatedAt],
+    queryFn: async () => {
+      const res = await getMyProfile();
+      if (!res.success || !res.data) throw new Error(res.error ?? "Profile not found");
+      return res.data as Profile;
+    },
+    staleTime: 300_000,
+    enabled: false, // only served from cache or explicit fetch
+  });
+
+/** ACTIVE projects + client names for task create/edit dropdowns. */
+export const projectsForTaskOptions = queryOptions<
+  Array<{ id: string; name: string; client_name: string }>
+>({
+  queryKey: qk.projectsForTask(),
+  queryFn: async () => {
+    const res = await getProjectsForTask();
+    if (!res.success || !res.data) throw new Error(res.error ?? "Failed to load projects");
+    return res.data;
+  },
+  staleTime: 120_000,
+});
+
+/** ACTIVE clients for the project create/edit dropdown. */
+export const activeClientsOptions = queryOptions({
+  queryKey: qk.activeClients(),
+  queryFn: async () => {
+    const res = await getActiveClients();
+    if (!res.success || !res.data) throw new Error(res.error ?? "Failed to load clients");
+    return res.data;
+  },
+  staleTime: 120_000,
+});
+
+/** Agency settings rows (key/value) — read-through cache for the settings form. */
+export const settingsOptions = queryOptions<Record<string, unknown>>({
+  queryKey: qk.settings(),
+  queryFn: async () => {
+    const { createClient } = await import("@/lib/supabase/client");
+    const { data, error } = await createClient().from("settings").select("*");
+    if (error) throw new Error(error.message);
+    return (data ?? []).reduce(
+      (acc: Record<string, unknown>, row: { key: string; value: unknown }) => {
+        acc[row.key] = row.value;
+        return acc;
+      },
+      {}
+    );
   },
   staleTime: 300_000,
 });

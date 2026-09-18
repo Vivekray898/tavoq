@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -18,14 +19,17 @@ import { Field, FieldLabel, FieldError, FieldGroup } from "@/components/ui/field
 import {
   createTaskAction,
   updateTaskAction,
-  getProjectsForTask,
 } from "@/lib/actions/tasks";
-import { getActiveEmployees } from "@/lib/actions/employees";
-import { getLabels } from "@/lib/actions/task-extras";
+import {
+  projectsForTaskOptions,
+  activeEmployeesOptions,
+  labelsOptions,
+} from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
 import { LABEL_CHIP, PRIORITY_LABELS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { taskSchema, type TaskInput } from "@/validators/schemas";
-import type { Label, Task } from "@/types/database";
+import type { Task } from "@/types/database";
 
 interface TaskFormProps {
   task?: Task;
@@ -62,11 +66,21 @@ function fromISTInstant(iso: string | null): { date: string; time: string } {
 export function TaskForm({ task, mode }: TaskFormProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const queryClient = useQueryClient();
 
   const [isLoading, setIsLoading] = useState(false);
-  const [projects, setProjects] = useState<Array<{ id: string; name: string; client_name: string }>>([]);
-  const [employees, setEmployees] = useState<Array<{ id: string; full_name: string }>>([]);
-  const [loadingData, setLoadingData] = useState(true);
+
+  // Dropdown data comes from the shared cache (§3): the tasks page and
+  // quick-add already hold projects/employees/labels, so opening this
+  // form usually costs zero requests and never refetches fresh cache.
+  const projectsQuery = useQuery(projectsForTaskOptions);
+  const employeesQuery = useQuery(activeEmployeesOptions);
+  const labelsQuery = useQuery(labelsOptions);
+  const projects = projectsQuery.data ?? [];
+  const employees = employeesQuery.data ?? [];
+  const labels = labelsQuery.data ?? [];
+  const loadingData = projectsQuery.isLoading || employeesQuery.isLoading;
+
   const [moreOpen, setMoreOpen] = useState(mode === "edit");
 
   const [projectId, setProjectId] = useState(
@@ -85,27 +99,12 @@ export function TaskForm({ task, mode }: TaskFormProps) {
   const [dueDate, setDueDate] = useState(initial.date);
   const [dueTime, setDueTime] = useState(initial.time || "18:00");
   const [paymentStatus, setPaymentStatus] = useState(task?.payment_status ?? "NOT_APPLICABLE");
-  const [labels, setLabels] = useState<Label[]>([]);
   const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>(
     // Edit mode: prefill from existing labels if the caller provided them
     []
   );
   const [subtaskLines, setSubtaskLines] = useState<string[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    (async () => {
-      const [projectsRes, empsRes, labelsRes] = await Promise.all([
-        getProjectsForTask(),
-        getActiveEmployees(),
-        getLabels(),
-      ]);
-      if (projectsRes.success && projectsRes.data) setProjects(projectsRes.data);
-      if (empsRes.success && empsRes.data) setEmployees(empsRes.data);
-      if (labelsRes.success && labelsRes.data) setLabels(labelsRes.data);
-      setLoadingData(false);
-    })();
-  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -153,6 +152,11 @@ export function TaskForm({ task, mode }: TaskFormProps) {
 
     if (result.success) {
       toast.success(mode === "create" ? "Task created" : "Task updated");
+      // The created/updated task reaches every list via realtime + the
+      // targeted invalidation the tasks page owns; nothing broader runs.
+      if (mode === "edit" && task) {
+        queryClient.invalidateQueries({ queryKey: qk.taskDetail(task.id), refetchType: "active" });
+      }
       router.push(mode === "create" ? `/tasks/${result.data?.id}` : `/tasks/${task!.id}`);
     } else {
       toast.error(result.error ?? "Something went wrong");

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2, LogOut, Mail } from "lucide-react";
@@ -13,6 +14,7 @@ import { Field, FieldLabel, FieldError, FieldGroup } from "@/components/ui/field
 import { Switch } from "@/components/ui/switch";
 import { profileSchema, type ProfileInput } from "@/validators/schemas";
 import { createClient } from "@/lib/supabase/client";
+import { useSession } from "@/components/providers/session-provider";
 import { getInitials, formatDate } from "@/lib/utils";
 import { ROLE_LABELS } from "@/lib/constants";
 import type { Profile } from "@/types/database";
@@ -26,45 +28,30 @@ interface Prefs {
 
 export default function ProfilePage() {
   const router = useRouter();
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [prefs, setPrefs] = useState<Prefs>({});
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const { profile: sessionProfile } = useSession();
+
+  // Seeded from the dashboard layout's already-loaded profile — zero
+  // requests on mount (§3). Edits patch this local copy + the session
+  // context; the layout re-validates on the next full navigation.
+  const [profile, setProfile] = useState<Profile>(sessionProfile);
+  const [prefs, setPrefs] = useState<Prefs>(
+    (sessionProfile.notification_prefs ?? {}) as Prefs
+  );
   const [isSaving, setIsSaving] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const {
     register,
     handleSubmit,
-    reset,
     formState: { errors },
   } = useForm<ProfileInput>({
     resolver: zodResolver(profileSchema),
+    defaultValues: {
+      full_name: sessionProfile.full_name,
+      phone: sessionProfile.phone ?? "",
+    },
   });
-
-  useEffect(() => {
-    (async () => {
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user) {
-        const { data } = await supabase
-          .from("profiles")
-          .select("*")
-          .eq("id", user.id)
-          .single();
-        if (data) {
-          setProfile(data as Profile);
-          setPrefs(((data as Profile).notification_prefs ?? {}) as Prefs);
-          reset({
-            full_name: data.full_name,
-            phone: data.phone ?? "",
-          });
-        }
-      }
-      setLoading(false);
-    })();
-  }, [reset]);
 
   async function onSubmit(data: ProfileInput) {
     if (!profile) return;
@@ -110,16 +97,13 @@ export default function ProfilePage() {
     setIsSigningOut(true);
     const supabase = createClient();
     await supabase.auth.signOut();
+    // Same isolation contract as the other sign-out paths (§19):
+    // stop realtime → clear cache → navigate.
+    queryClient.clear();
     router.push("/login");
+    router.refresh();
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-4 py-1">
-        <div className="h-16 w-64 animate-pulse rounded-lg bg-muted" />
-      </div>
-    );
-  }
   if (!profile) return null;
 
   const prefRows: Array<{ key: keyof Prefs; label: string; description: string }> = [

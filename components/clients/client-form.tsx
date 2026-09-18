@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Field, FieldLabel, FieldError, FieldGroup } from "@/components/ui/field";
 import { clientSchema, type ClientInput } from "@/validators/schemas";
 import { createClientAction, updateClientAction } from "@/lib/actions/clients";
+import { qk } from "@/lib/queries/keys";
 import { toast } from "sonner";
 import type { Client } from "@/types/database";
 
@@ -52,8 +53,24 @@ export function ClientForm({ client, mode }: ClientFormProps) {
 
     if (result.success) {
       toast.success(mode === "create" ? "Client created" : "Client updated");
-      // Targeted invalidation instead of a full route refresh (§11).
-      await queryClient.invalidateQueries({ queryKey: ["clients"] });
+      // Targeted (§11): refresh only client list caches; patch the
+      // detail + active-dropdown entries from the authoritative row.
+      await queryClient.invalidateQueries({
+        queryKey: ["clients", "list"],
+        refetchType: "active",
+      });
+      const saved = result.data;
+      if (saved) {
+        if (queryClient.getQueryData(qk.clientDetail(saved.id))) {
+          queryClient.setQueryData(qk.clientDetail(saved.id), (prev: object | undefined) =>
+            prev ? { ...prev, ...saved } : prev
+          );
+        }
+        queryClient.invalidateQueries({
+          queryKey: qk.activeClients(),
+          refetchType: "active",
+        });
+      }
       router.push(mode === "create" ? "/clients" : `/clients/${client?.id}`);
     } else {
       toast.error(result.error || "Something went wrong");

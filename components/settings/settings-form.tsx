@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -10,9 +11,17 @@ import { Input } from "@/components/ui/input";
 import { Field, FieldLabel, FieldGroup } from "@/components/ui/field";
 import { settingsSchema, type SettingsInput } from "@/validators/schemas";
 import { createClient } from "@/lib/supabase/client";
+import { settingsOptions } from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
 
 export function SettingsForm() {
-  const [isLoading, setIsLoading] = useState(true);
+  const queryClient = useQueryClient();
+
+  // Cached read — revisiting /settings serves cache instead of re-reading
+  // the settings table (§3).
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data;
+  const isLoading = settingsQuery.isLoading;
   const [isSaving, setIsSaving] = useState(false);
 
   const {
@@ -29,26 +38,16 @@ export function SettingsForm() {
     },
   });
 
+  // Hydrate form defaults once cached values exist (setValue writes
+  // form state only — the cache remains the single source of truth).
   useEffect(() => {
-    (async () => {
-      const supabase = createClient();
-      const { data } = await supabase.from("settings").select("*");
-      if (data) {
-        const settings = data.reduce(
-          (acc: Record<string, unknown>, row: { key: string; value: unknown }) => {
-            acc[row.key] = row.value;
-            return acc;
-          },
-          {} as Record<string, unknown>
-        );
-        if (typeof settings.agency_name === "string")
-          setValue("agency_name", settings.agency_name);
-        if (typeof settings.currency === "string") setValue("currency", settings.currency);
-        if (typeof settings.timezone === "string") setValue("timezone", settings.timezone);
-      }
-      setIsLoading(false);
-    })();
-  }, [setValue]);
+    if (!settings) return;
+    if (typeof settings.agency_name === "string") {
+      setValue("agency_name", settings.agency_name);
+    }
+    if (typeof settings.currency === "string") setValue("currency", settings.currency);
+    if (typeof settings.timezone === "string") setValue("timezone", settings.timezone);
+  }, [settings, setValue]);
 
   async function onSubmit(data: SettingsInput) {
     setIsSaving(true);
@@ -66,6 +65,13 @@ export function SettingsForm() {
     if (error) {
       toast.error("Couldn't save settings");
     } else {
+      // Write the authoritative values back into the cache entry.
+      queryClient.setQueryData<Record<string, unknown>>(qk.settings(), (prev) => ({
+        ...(prev ?? {}),
+        agency_name: data.agency_name,
+        currency: data.currency || "INR",
+        timezone: data.timezone || "Asia/Kolkata",
+      }));
       toast.success("Settings saved");
     }
   }

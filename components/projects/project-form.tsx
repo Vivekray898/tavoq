@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -19,8 +20,11 @@ import {
   createProjectAction,
   updateProjectAction,
 } from "@/lib/actions/projects";
-import { getActiveClients } from "@/lib/actions/clients";
-import { getActiveEmployees } from "@/lib/actions/employees";
+import {
+  activeClientsOptions,
+  activeEmployeesOptions,
+} from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
 import { PROJECT_STATUS_LABELS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { projectSchema, type ProjectInput } from "@/validators/schemas";
@@ -33,11 +37,17 @@ interface ProjectFormProps {
 
 export function ProjectForm({ project, mode }: ProjectFormProps) {
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const [isLoading, setIsLoading] = useState(false);
-  const [clients, setClients] = useState<Array<{ id: string; name: string }>>([]);
-  const [employees, setEmployees] = useState<Array<{ id: string; full_name: string }>>([]);
-  const [loadingData, setLoadingData] = useState(true);
+
+  // Shared cached dropdown data (§3) — the clients/employees pages hold
+  // these entries already; the form reads cache instead of refetching.
+  const clientsQuery = useQuery(activeClientsOptions);
+  const employeesQuery = useQuery(activeEmployeesOptions);
+  const clients = clientsQuery.data ?? [];
+  const employees = employeesQuery.data ?? [];
+  const loadingData = clientsQuery.isLoading || employeesQuery.isLoading;
 
   const [clientId, setClientId] = useState(project?.client_id ?? "");
   const [name, setName] = useState(project?.name ?? "");
@@ -47,18 +57,6 @@ export function ProjectForm({ project, mode }: ProjectFormProps) {
   const [endDate, setEndDate] = useState(project?.end_date ?? "");
   const [memberIds, setMemberIds] = useState<string[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    (async () => {
-      const [clientsRes, empsRes] = await Promise.all([
-        getActiveClients(),
-        getActiveEmployees(),
-      ]);
-      if (clientsRes.success && clientsRes.data) setClients(clientsRes.data);
-      if (empsRes.success && empsRes.data) setEmployees(empsRes.data);
-      setLoadingData(false);
-    })();
-  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -93,6 +91,18 @@ export function ProjectForm({ project, mode }: ProjectFormProps) {
 
     if (result.success) {
       toast.success(mode === "create" ? "Project created" : "Project updated");
+      // Targeted: refresh the project lists (membership may have moved
+      // tabs) and patch the edited project's detail from the server row.
+      await queryClient.invalidateQueries({
+        queryKey: ["projects", "list"],
+        refetchType: "active",
+      });
+      const saved = result.data;
+      if (mode === "edit" && saved?.id) {
+        queryClient.setQueryData(qk.projectDetail(saved.id), (prev: object | undefined) =>
+          prev ? { ...prev, ...saved } : prev
+        );
+      }
       // §57: after creation, go straight to the project workspace
       router.push(mode === "create" ? `/projects/${result.data?.id}` : `/projects/${project!.id}`);
     } else {

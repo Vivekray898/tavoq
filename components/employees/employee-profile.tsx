@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { SkeletonPage } from "@/components/shared/skeleton-loader";
 import { StatusDot } from "@/components/shared/status-dot";
-import { getEmployeeProfile } from "@/lib/actions/employees";
+import { employeeDetailOptions } from "@/lib/queries/options";
 import {
   formatCurrency,
   formatDate,
@@ -17,18 +17,10 @@ import {
 import type { TaskStatus } from "@/types/database";
 
 export function EmployeeProfile({ employeeId }: { employeeId: string }) {
-  const [data, setData] = useState<Awaited<
-    ReturnType<typeof getEmployeeProfile>
-  >["data"] | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    (async () => {
-      const result = await getEmployeeProfile(employeeId);
-      if (result.success && result.data) setData(result.data);
-      setLoading(false);
-    })();
-  }, [employeeId]);
+  // Cached detail — revisiting an employee profile reads cache (§3).
+  const query = useQuery(employeeDetailOptions(employeeId));
+  const data = query.data;
+  const loading = query.isLoading;
 
   if (loading) return <SkeletonPage />;
   if (!data) {

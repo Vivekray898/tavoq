@@ -46,6 +46,69 @@ export function RealtimeProvider({
       }
     };
 
+    /**
+     * Comment-author resolution cache (§2 — no N+1). Known authors come
+     * from cached task details / the team list; genuinely unknown authors
+     * are batch-fetched with one `.in("id", ids)` read and remembered for
+     * the session. Ten comments from five users = zero to one query.
+     */
+    const authorCache = new Map<
+      string,
+      { id: string; full_name: string; avatar_url: string | null }
+    >();
+    let authorsInFlight: Promise<void> | null = null;
+
+    const seedAuthorsFromCaches = () => {
+      queryClient
+        .getQueriesData<TaskDetail>({ queryKey: ["tasks", "detail"] })
+        .forEach(([, detail]) => {
+          detail?.comments.forEach((c) => {
+            if (c.user && !authorCache.has(c.user_id)) {
+              authorCache.set(c.user_id, c.user);
+            }
+          });
+        });
+      const team = queryClient.getQueryData<{ id: string; full_name: string; avatar_url: string | null }[]>(
+        qk.employeesList()
+      );
+      team?.forEach((m) => {
+        if (!authorCache.has(m.id)) authorCache.set(m.id, { id: m.id, full_name: m.full_name, avatar_url: m.avatar_url });
+      });
+      const active = queryClient.getQueryData<
+        { id: string; full_name: string; avatar_url: string | null }[]
+      >(qk.activeEmployees());
+      active?.forEach((m) => {
+        if (!authorCache.has(m.id)) authorCache.set(m.id, { id: m.id, full_name: m.full_name, avatar_url: m.avatar_url });
+      });
+    };
+
+    const fetchMissingAuthors = (missing: string[]) => {
+      if (missing.length === 0) return Promise.resolve();
+      if (!authorsInFlight) {
+        authorsInFlight = (async () => {
+          try {
+            const { data } = await supabase
+              .from("profiles")
+              .select("id, full_name, avatar_url")
+              .in("id", missing);
+            (data ?? []).forEach((p) => authorCache.set(p.id, p));
+          } catch {
+            /* fall through to placeholder resolution */
+          } finally {
+            authorsInFlight = null;
+          }
+        })();
+      }
+      return authorsInFlight;
+    };
+
+    const resolveAuthor = (userId: string) =>
+      authorCache.get(userId) ?? {
+        id: userId,
+        full_name: "Unknown",
+        avatar_url: null,
+      };
+
     /** task_comments INSERT → append to the open task's detail cache only (§6). */
     const appendComment = async (row: {
       id: string;
@@ -59,23 +122,19 @@ export function RealtimeProvider({
       if (!cached) return; // task not open → nothing to update
       if (cached.comments.some((c) => c.id === row.id)) return;
 
-      let author =
-        cached.comments.find((c) => c.user_id === row.user_id)?.user ?? null;
-      if (!author) {
-        // One tiny profile read only when we truly don't know the author.
-        const { data } = await supabase
-          .from("profiles")
-          .select("id, full_name, avatar_url")
-          .eq("id", row.user_id)
-          .maybeSingle();
-        author = data ?? { id: row.user_id, full_name: "Unknown", avatar_url: null };
+      seedAuthorsFromCaches();
+      const knownAuthor = authorCache.get(row.user_id);
+      if (!knownAuthor) {
+        // One batched read for all currently-missing authors, shared
+        // across concurrent comment events.
+        await fetchMissingAuthors([row.user_id]);
       }
 
       queryClient.setQueryData<TaskDetail>(detailKey, (prev) =>
         prev
           ? {
               ...prev,
-              comments: [...prev.comments, { ...row, user: author }].sort(
+              comments: [...prev.comments, { ...row, user: resolveAuthor(row.user_id) }].sort(
                 (a, b) =>
                   new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
               ),
@@ -104,6 +163,23 @@ export function RealtimeProvider({
       }
     };
 
+    /**
+     * §4 Dashboard: task/comment/payment events sync the dashboard
+     * metrics ONLY while it's currently mounted; if unmounted, nothing
+     * runs (no background fetches — it serves fresh cache on next visit).
+     * A short debounce also collapses bursts of events into one sync.
+     */
+    let dashboardTimer: ReturnType<typeof setTimeout> | null = null;
+    const syncDashboard = () => {
+      const mounted = queryClient.getQueryData(["dashboard", "admin"]) || queryClient.getQueryData(["dashboard", "employee"]);
+      if (!mounted) return; // dashboard not on screen → do nothing
+      if (dashboardTimer) clearTimeout(dashboardTimer);
+      dashboardTimer = setTimeout(() => {
+        dashboardTimer = null;
+        queryClient.invalidateQueries({ queryKey: ["dashboard"], refetchType: "active" });
+      }, 400);
+    };
+
     const channel = supabase
       .channel("taskora-realtime")
       .on(
@@ -114,12 +190,16 @@ export function RealtimeProvider({
           // labels…), so patching list items isn't safe. Refetch only the
           // mounted ['tasks'] list; nothing else runs.
           queryClient.invalidateQueries({ queryKey: qk.tasks(), refetchType: "active" });
+          syncDashboard();
         }
       )
       .on(
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "tasks" },
-        (payload) => patchCachedTask(payload.new as Record<string, unknown>)
+        (payload) => {
+          patchCachedTask(payload.new as Record<string, unknown>);
+          syncDashboard();
+        }
       )
       .on(
         "postgres_changes",
@@ -127,24 +207,33 @@ export function RealtimeProvider({
         (payload) => {
           const id = (payload.old as { id?: string }).id;
           if (!id) return;
+          // Scrub from every task-shaped cache (§2).
           queryClient.setQueriesData<TaskListItem[]>({ queryKey: qk.tasks() }, (list) =>
             Array.isArray(list) ? list.filter((t) => t.id !== id) : list
           );
           queryClient.removeQueries({ queryKey: qk.taskDetail(id) });
+          syncDashboard();
         }
       )
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "task_comments" },
-        (payload) => void appendComment(payload.new as never)
+        (payload) => {
+          void appendComment(payload.new as never);
+          // A new comment changes comments_count on the task → mounted
+          // dashboards that aggregate it sync. Unmounted: nothing runs.
+          syncDashboard();
+        }
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "payments" },
         () => {
           // Task rows are updated alongside payments, so the tasks UPDATE
-          // event keeps task caches fresh. Here only payment queries sync.
+          // event keeps task caches fresh. Sync payment queries + mounted
+          // dashboard metrics only.
           queryClient.invalidateQueries({ queryKey: ["payments"], refetchType: "active" });
+          syncDashboard();
         }
       )
       .on(
@@ -195,7 +284,17 @@ export function RealtimeProvider({
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "profiles" },
-        () => {
+        (payload) => {
+          const row = payload.new as Record<string, unknown> | undefined;
+          const id = row?.id as string | undefined;
+          // Scope: only the changed employee's detail + the cached team
+          // list is marked stale. No other resource is touched.
+          if (id) {
+            queryClient.invalidateQueries({
+              queryKey: qk.employeeDetail(id),
+              refetchType: "none",
+            });
+          }
           queryClient.invalidateQueries({
             queryKey: qk.employeesList(),
             refetchType: "active",
