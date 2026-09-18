@@ -7,27 +7,47 @@ import type { ActionResponse, Profile, UserRole } from "@/types/database";
 export interface TeamMember extends Profile {
   active_tasks: number;
   projects_count: number;
+  /** §15 — workload snapshot for the admin employees overview */
+  overdue_tasks: number;
+  awaiting_review: number;
+  pending_payment: number;
 }
 
 export async function getTeamMembers(): Promise<ActionResponse<TeamMember[]>> {
   try {
     await requireAdmin();
     const supabase = await createClient();
-    const [{ data: profiles, error }, { data: tasks }, { data: memberships }] = await Promise.all([
-      supabase.from("profiles").select("*").order("created_at", { ascending: false }),
-      supabase.from("tasks").select("assigned_to, status").not("status", "eq", "COMPLETED"),
-      supabase.from("project_members").select("user_id"),
-    ]);
+    const now = Date.now();
+    const [{ data: profiles, error }, { data: tasks }, { data: memberships }, { data: pendingPayments }] =
+      await Promise.all([
+        supabase.from("profiles").select("*").order("created_at", { ascending: false }),
+        supabase.from("tasks").select("assigned_to, status, deadline").not("status", "eq", "COMPLETED"),
+        supabase.from("project_members").select("user_id"),
+        supabase.from("payments").select("employee_id, amount").is("paid_at", null),
+      ]);
 
     if (error) return { success: false, error: "Failed to load team" };
 
     const activeTasks = new Map<string, number>();
+    const overdueTasks = new Map<string, number>();
+    const awaitingReview = new Map<string, number>();
     for (const task of tasks ?? []) {
-      if (task.assigned_to) activeTasks.set(task.assigned_to, (activeTasks.get(task.assigned_to) ?? 0) + 1);
+      if (!task.assigned_to) continue;
+      activeTasks.set(task.assigned_to, (activeTasks.get(task.assigned_to) ?? 0) + 1);
+      if (task.status === "SUBMITTED") {
+        awaitingReview.set(task.assigned_to, (awaitingReview.get(task.assigned_to) ?? 0) + 1);
+      } else if (task.deadline && new Date(task.deadline).getTime() < now) {
+        overdueTasks.set(task.assigned_to, (overdueTasks.get(task.assigned_to) ?? 0) + 1);
+      }
     }
     const projects = new Map<string, number>();
     for (const membership of memberships ?? []) {
       projects.set(membership.user_id, (projects.get(membership.user_id) ?? 0) + 1);
+    }
+    const pendingPayment = new Map<string, number>();
+    for (const p of pendingPayments ?? []) {
+      if (!p.employee_id) continue;
+      pendingPayment.set(p.employee_id, (pendingPayment.get(p.employee_id) ?? 0) + Number(p.amount));
     }
 
     return {
@@ -36,6 +56,9 @@ export async function getTeamMembers(): Promise<ActionResponse<TeamMember[]>> {
         ...(profile as Profile),
         active_tasks: activeTasks.get(profile.id) ?? 0,
         projects_count: projects.get(profile.id) ?? 0,
+        overdue_tasks: overdueTasks.get(profile.id) ?? 0,
+        awaiting_review: awaitingReview.get(profile.id) ?? 0,
+        pending_payment: pendingPayment.get(profile.id) ?? 0,
       })),
     };
   } catch {

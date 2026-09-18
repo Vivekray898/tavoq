@@ -279,6 +279,31 @@ export default function ProjectDetailPage() {
             ))}
           </div>
 
+          {/* §16 — lightweight progress from existing task data */}
+          {counts.total > 0 && (
+            <div className="max-w-md">
+              <div className="mb-1.5 flex items-center justify-between text-xs text-muted-foreground">
+                <span>
+                  {counts.completed} / {counts.total} tasks completed
+                </span>
+                <span className="font-medium tabular-nums text-foreground">
+                  {Math.round((counts.completed / counts.total) * 100)}%
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all"
+                  style={{ width: `${Math.round((counts.completed / counts.total) * 100)}%` }}
+                />
+              </div>
+              {counts.overdue > 0 && (
+                <p className="mt-1.5 text-xs text-destructive">
+                  {counts.overdue} overdue
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Members */}
           <section>
             <h2 className="mb-3 text-sm font-semibold">Team</h2>

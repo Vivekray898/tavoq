@@ -13,6 +13,8 @@ export interface AdminDashboardData {
     due_today: number;
     needs_review: number;
     overdue: number;
+    pending_payments: number;
+    pending_approvals: number;
   };
   needs_attention: Array<{
     id: string;
@@ -56,7 +58,16 @@ export async function getAdminDashboard(): Promise<
     const startIso = startOfToday.toISOString();
     const endIso = endOfToday.toISOString();
 
-    const [dueTodayRes, reviewRes, overdueRes, submittedRes, todaysRes, activityRes] =
+    const [
+      dueTodayRes,
+      reviewRes,
+      overdueRes,
+      submittedRes,
+      todaysRes,
+      pendingPayRes,
+      pendingApprovalsRes,
+      activityRes,
+    ] =
       await Promise.all([
         supabase
           .from("tasks")
@@ -92,6 +103,17 @@ export async function getAdminDashboard(): Promise<
           .or(`deadline.lte.${endIso},deadline.gte.${startIso}`)
           .order("deadline", { ascending: true, nullsFirst: false })
           .limit(8),
+        // §6 — real counters, never hardcoded: pending payment rows
+        supabase
+          .from("payments")
+          .select("amount")
+          .is("paid_at", null),
+        // PENDING employee account approvals
+        supabase
+          .from("profiles")
+          .select("id", { count: "exact", head: true })
+          .eq("role", "EMPLOYEE")
+          .eq("status", "PENDING"),
         // Recent activity: comments + recent task updates
         supabase
           .from("task_comments")
@@ -210,6 +232,10 @@ export async function getAdminDashboard(): Promise<
           due_today: dueTodayRes.count ?? 0,
           needs_review: reviewRes.count ?? 0,
           overdue: overdueRes.count ?? 0,
+          pending_payments: (
+            (pendingPayRes.data ?? []) as Array<{ amount: number | string }>
+          ).reduce((sum: number, row) => sum + Number(row.amount), 0),
+          pending_approvals: pendingApprovalsRes.count ?? 0,
         },
         needs_attention,
         todays_work,
@@ -389,6 +415,7 @@ export interface SearchResult {
   tasks: Array<{ id: string; title: string; project_name: string | null }>;
   projects: Array<{ id: string; name: string; client_name: string | null }>;
   clients: Array<{ id: string; name: string }>;
+  employees: Array<{ id: string; full_name: string; email: string }>;
 }
 
 export async function globalSearch(query: string): Promise<ActionResponse<SearchResult>> {
@@ -397,7 +424,7 @@ export async function globalSearch(query: string): Promise<ActionResponse<Search
     const supabase = await createClient();
     const q = query.trim();
     if (q.length < 2) {
-      return { success: true, data: { tasks: [], projects: [], clients: [] } };
+      return { success: true, data: { tasks: [], projects: [], clients: [], employees: [] } };
     }
     const like = `%${q}%`;
 
@@ -425,17 +452,27 @@ export async function globalSearch(query: string): Promise<ActionResponse<Search
         .eq("user_id", profile.id);
       const ids = memberProjects?.map((m) => m.project_id) ?? [];
       if (ids.length === 0) {
-        return { success: true, data: { tasks: [], projects: [], clients: [] } };
+        return { success: true, data: { tasks: [], projects: [], clients: [], employees: [] } };
       }
       projectQuery = projectQuery.in("id", ids);
     }
 
-    const [tasksRes, projectsRes, clientsRes] = await Promise.all([
+    const [tasksRes, projectsRes, clientsRes, employeesRes] = await Promise.all([
       taskQuery,
       projectQuery,
       profile.role === "ADMIN"
         ? supabase.from("clients").select("id, name").ilike("name", like).limit(4)
         : Promise.resolve({ data: [] as { id: string; name: string }[] }),
+      // Employees are only searchable by admins (RLS matches this)
+      profile.role === "ADMIN"
+        ? supabase
+            .from("profiles")
+            .select("id, full_name, email")
+            .eq("role", "EMPLOYEE")
+            .eq("status", "ACTIVE")
+            .or(`full_name.ilike.${like},email.ilike.${like}`)
+            .limit(4)
+        : Promise.resolve({ data: [] as { id: string; full_name: string; email: string }[] }),
     ]);
 
     return {
@@ -455,6 +492,8 @@ export async function globalSearch(query: string): Promise<ActionResponse<Search
           })
         ),
         clients: (clientsRes as { data: { id: string; name: string }[] | null }).data ?? [],
+        employees: (employeesRes as { data: { id: string; full_name: string; email: string }[] | null })
+          .data ?? [],
       },
     };
   } catch {

@@ -56,6 +56,12 @@ export interface ClientDetail extends Client {
     status: string;
     active_tasks: number;
   }>;
+  /** §17 — operational snapshot over this client's non-archived projects */
+  task_stats: {
+    active: number;
+    completed: number;
+    overdue: number;
+  };
 }
 
 export async function getClient(id: string): Promise<ActionResponse<ClientDetail>> {
@@ -94,6 +100,23 @@ export async function getClient(id: string): Promise<ActionResponse<ClientDetail
       });
     }
 
+    // §17 — task stats across the client's projects (same RLS scope)
+    const taskStats = { active: 0, completed: 0, overdue: 0 };
+    if (projectIds.length > 0) {
+      const { data: statTasks } = await supabase
+        .from("tasks")
+        .select("status, deadline, project_id")
+        .in("project_id", projectIds);
+      const now = Date.now();
+      for (const t of statTasks ?? [] as Array<{ status: string; deadline: string | null }>) {
+        if (t.status === "COMPLETED") taskStats.completed += 1;
+        else {
+          taskStats.active += 1;
+          if (t.deadline && new Date(t.deadline).getTime() < now) taskStats.overdue += 1;
+        }
+      }
+    }
+
     return {
       success: true,
       data: {
@@ -102,6 +125,7 @@ export async function getClient(id: string): Promise<ActionResponse<ClientDetail
           ...p,
           active_tasks: counts.get(p.id) ?? 0,
         })),
+        task_stats: taskStats,
       },
     };
   } catch {

@@ -94,6 +94,7 @@ export interface ProjectDetail
     completed: number;
     in_progress: number;
     submitted: number;
+    overdue: number;
   };
   tasks: Array<{
     id: string;
@@ -182,6 +183,12 @@ export async function getProject(id: string): Promise<ActionResponse<ProjectDeta
         (t) => t.status === "IN_PROGRESS" || t.status === "TODO" || t.status === "REVISION_REQUIRED"
       ).length,
       submitted: tasks.filter((t) => t.status === "SUBMITTED").length,
+      overdue: tasks.filter(
+        (t) =>
+          t.status !== "COMPLETED" &&
+          t.deadline &&
+          new Date(t.deadline).getTime() < Date.now()
+      ).length,
     };
 
     const client = data.client as unknown as { id: string; name: string }[] | null;

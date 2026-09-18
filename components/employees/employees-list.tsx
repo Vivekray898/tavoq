@@ -34,7 +34,7 @@ import {
 import {
   teamMembersOptions,
 } from "@/lib/queries/options";
-import { formatDate } from "@/lib/utils";
+import { formatDate, formatCurrency, cn } from "@/lib/utils";
 import { toast } from "sonner";
 
 type TeamTab = "ACTIVE" | "PENDING" | "SUSPENDED";
@@ -233,7 +233,25 @@ export function EmployeesList() {
                   <span className="block text-sm font-semibold tabular-nums text-foreground">
                     {member.active_tasks}
                   </span>
-                  active tasks
+                  active
+                </span>
+                <span className="text-center">
+                  <span className={cn("block text-sm font-semibold tabular-nums", member.overdue_tasks > 0 && "text-destructive")}>
+                    {member.overdue_tasks}
+                  </span>
+                  overdue
+                </span>
+                <span className="text-center">
+                  <span className={cn("block text-sm font-semibold tabular-nums", member.awaiting_review > 0 && "text-violet-600 dark:text-violet-400")}>
+                    {member.awaiting_review}
+                  </span>
+                  in review
+                </span>
+                <span className="text-center">
+                  <span className={cn("block text-sm font-semibold tabular-nums", member.pending_payment > 0 && "text-amber-600 dark:text-amber-400")}>
+                    {formatCurrency(member.pending_payment)}
+                  </span>
+                  pending pay
                 </span>
                 <span className="text-center">
                   <span className="block text-sm font-semibold tabular-nums text-foreground">

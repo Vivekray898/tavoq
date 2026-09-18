@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   IndianRupee,
   Loader2,
+  Pencil,
   Plus,
   Search,
   Users,
@@ -38,6 +39,8 @@ import {
   createCustomPayment,
   createPaymentFromTasks,
   markPaymentPaid,
+  markPaymentsPaidBatch,
+  updatePaymentNote,
 } from "@/lib/actions/payments";
 import {
   paymentWorkspaceOptions,
@@ -75,6 +78,16 @@ export function AdminPaymentsView() {
   const [customDescription, setCustomDescription] = useState("");
   const [customMarkPaid, setCustomMarkPaid] = useState(false);
   const [customSaving, setCustomSaving] = useState(false);
+
+  // §8 — bulk mark-paid selection over the history list
+  const [bulkIds, setBulkIds] = useState<Set<string>>(new Set());
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  const [bulkWorking, setBulkWorking] = useState(false);
+
+  // §9/§10 — payment detail dialog + note editing
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteSaving, setNoteSaving] = useState(false);
 
   // Employee selector uses the cached team list so names render even
   // before workspace history loads; fall back to the workspace list.
@@ -118,10 +131,80 @@ export function AdminPaymentsView() {
   );
   const selectedTotal = selectedEntries.reduce((sum, e) => sum + e.amount, 0);
 
-  const history = data?.history ?? [];
+  const history = useMemo(() => data?.history ?? [], [data?.history]);
+  const pendingHistory = useMemo(() => history.filter((p) => p.status === "PENDING"), [history]);
   const selectedEmployeeName = selectedEmployeeId
     ? (employeeItems[selectedEmployeeId] ?? "")
     : "";
+
+  const detail = detailId ? (history.find((p) => p.id === detailId) ?? null) : null;
+
+  function openDetail(p: PaymentItem) {
+    setDetailId(p.id);
+    setNoteDraft(p.payment_note ?? "");
+  }
+
+  async function saveNote() {
+    if (!detail) return;
+    setNoteSaving(true);
+    const result = await updatePaymentNote(detail.id, noteDraft);
+    setNoteSaving(false);
+    if (result.success) {
+      // Patch the history row in place — no refetch (§6).
+      queryClient.setQueryData<PaymentWorkspaceData>(qk.paymentWorkspace(), (prev) =>
+        prev
+          ? {
+              ...prev,
+              history: prev.history.map((p) =>
+                p.id === detail.id ? { ...p, payment_note: result.data!.payment_note } : p
+              ),
+            }
+          : prev
+      );
+      toast.success("Note saved");
+      setDetailId(null);
+    } else {
+      toast.error(result.error ?? "Couldn't save the note");
+    }
+  }
+
+  function toggleBulk(id: string) {
+    setBulkIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function runBulkMarkPaid() {
+    if (bulkIds.size === 0) return;
+    setBulkWorking(true);
+    const result = await markPaymentsPaidBatch(Array.from(bulkIds));
+    setBulkWorking(false);
+    if (result.success && result.data) {
+      const paidAtById = new Map(result.data.items.map((i) => [i.id, i.paid_at]));
+      queryClient.setQueryData<PaymentWorkspaceData>(qk.paymentWorkspace(), (prev) =>
+        prev
+          ? {
+              ...prev,
+              history: prev.history.map((p) =>
+                paidAtById.has(p.id)
+                  ? { ...p, status: "PAID" as const, paid_at: paidAtById.get(p.id)! }
+                  : p
+              ),
+            }
+          : prev
+      );
+      toast.success(
+        `Marked ${result.data.marked} payment${result.data.marked !== 1 ? "s" : ""} paid — ${formatCurrency(result.data.totalAmount)}`
+      );
+      setBulkIds(new Set());
+      setBulkConfirmOpen(false);
+    } else {
+      toast.error(result.error ?? "Couldn't mark the payments as paid");
+    }
+  }
 
   function toggleTask(id: string) {
     setSelected((prev) => {
@@ -460,9 +543,34 @@ export function AdminPaymentsView() {
         )}
       </div>
 
-      {/* Payment history — task-based + custom */}
+      {/* Payment history — task-based + custom, with §8 bulk selection */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-foreground">Payment history</h2>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Payment history</h2>
+          {bulkIds.size > 0 ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-muted-foreground">
+                {bulkIds.size} selected
+              </span>
+              <Button type="button" size="sm" onClick={() => setBulkConfirmOpen(true)}>
+                <CheckCheck className="size-4" /> Mark as paid
+              </Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setBulkIds(new Set())}>
+                Clear
+              </Button>
+            </div>
+          ) : (
+            pendingHistory.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setBulkIds(new Set(pendingHistory.map((p) => p.id)))}
+                className="text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                Select {pendingHistory.length} pending
+              </button>
+            )
+          )}
+        </div>
         {history.length === 0 ? (
           <p className="rounded-xl border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
             <CheckCircle2 className="mr-1.5 inline size-4 text-emerald-500" />
@@ -472,13 +580,25 @@ export function AdminPaymentsView() {
           <div className="divide-y rounded-xl border bg-card">
             {history.map((p) => (
               <div key={p.id} className="flex items-center gap-3 px-4 py-3">
+                {p.status === "PENDING" && (
+                  <Checkbox
+                    checked={bulkIds.has(p.id)}
+                    onCheckedChange={() => toggleBulk(p.id)}
+                    aria-label={`Select payment for ${p.employee_name ?? "employee"}`}
+                    className="shrink-0"
+                  />
+                )}
                 {p.status === "PAID" ? (
                   <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
                 ) : (
                   <span className="size-2 shrink-0 rounded-full bg-amber-500" />
                 )}
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">
+                <button
+                  type="button"
+                  onClick={() => openDetail(p)}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <p className="truncate text-sm font-medium hover:underline">
                     {p.label}
                     {p.kind === "CUSTOM" && (
                       <span className="ml-2 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
@@ -494,7 +614,7 @@ export function AdminPaymentsView() {
                       : " · pending"}
                     {p.payment_note ? ` · ${p.payment_note}` : ""}
                   </p>
-                </div>
+                </button>
                 {p.status === "PENDING" && (
                   <Button
                     type="button"
@@ -507,14 +627,16 @@ export function AdminPaymentsView() {
                     Mark paid
                   </Button>
                 )}
-                <span
+                <button
+                  type="button"
+                  onClick={() => openDetail(p)}
                   className={cn(
-                    "shrink-0 text-sm font-semibold tabular-nums",
+                    "shrink-0 text-sm font-semibold tabular-nums hover:underline",
                     p.status === "PENDING" && "text-amber-600 dark:text-amber-400"
                   )}
                 >
                   {formatCurrency(p.amount)}
-                </span>
+                </button>
               </div>
             ))}
           </div>
@@ -557,6 +679,134 @@ export function AdminPaymentsView() {
             <Button onClick={handleCreatePayment} disabled={creating || selectedTotal <= 0}>
               {creating ? <Loader2 className="size-4 animate-spin" /> : <IndianRupee className="size-4" />}
               Create payment
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* §9/§10 — payment detail dialog */}
+      <Dialog open={!!detail} onOpenChange={(open) => !open && setDetailId(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {detail?.kind === "CUSTOM" ? "Custom payment" : "Task payment"}
+            </DialogTitle>
+            <DialogDescription>
+              {detail?.employee_name ?? ""}
+            </DialogDescription>
+          </DialogHeader>
+          {detail && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <p className="text-xs text-muted-foreground">Amount</p>
+                  <p className="mt-0.5 font-semibold tabular-nums">{formatCurrency(detail.amount)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Status</p>
+                  <p className="mt-0.5 font-medium">
+                    {detail.status === "PAID" ? (
+                      <span className="text-emerald-600 dark:text-emerald-400">Paid</span>
+                    ) : (
+                      <span className="text-amber-600 dark:text-amber-400">Pending</span>
+                    )}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Paid date</p>
+                  <p className="mt-0.5">{detail.paid_at ? formatDate(detail.paid_at) : "—"}</p>
+                </div>
+              </div>
+              {detail.kind === "TASK" ? (
+                <div>
+                  <p className="text-xs text-muted-foreground">Task</p>
+                  {detail.task_id ? (
+                    <Link href={`/tasks/${detail.task_id}`} className="text-sm font-medium hover:underline">
+                      {detail.label}
+                    </Link>
+                  ) : (
+                    <p className="text-sm">{detail.label}</p>
+                  )}
+                  {detail.project_name && (
+                    <p className="mt-0.5 text-[13px] text-muted-foreground">{detail.project_name}</p>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <p className="text-xs text-muted-foreground">Description</p>
+                  <p className="mt-0.5 text-sm">{detail.label}</p>
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground" htmlFor="payment-note">
+                  Note
+                </label>
+                <Textarea
+                  id="payment-note"
+                  rows={2}
+                  placeholder="e.g. Monthly bonus, advance payment…"
+                  value={noteDraft}
+                  onChange={(e) => setNoteDraft(e.target.value)}
+                />
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={noteSaving}
+                    onClick={saveNote}
+                  >
+                    <Pencil className="size-3.5" />
+                    {noteSaving ? "Saving…" : "Save note"}
+                  </Button>
+                </div>
+              </div>
+              {detail.status === "PENDING" && (
+                <Button
+                  type="button"
+                  className="w-full"
+                  onClick={() => {
+                    void handleMarkPaid(detail).then(() => {
+                      setDetailId(null);
+                    });
+                  }}
+                >
+                  <CheckCheck className="size-4" /> Mark as paid
+                </Button>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* §8 — bulk mark-paid confirmation */}
+      <Dialog open={bulkConfirmOpen} onOpenChange={setBulkConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Mark {bulkIds.size} payment{bulkIds.size !== 1 ? "s" : ""} as paid?</DialogTitle>
+            <DialogDescription>
+              Employees are notified for each payout. This can&apos;t be undone from here.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-48 divide-y overflow-y-auto rounded-lg border bg-card text-sm">
+            {history
+              .filter((p) => bulkIds.has(p.id))
+              .map((p) => (
+                <div key={p.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <span className="min-w-0 flex-1 truncate">
+                    {p.employee_name ?? "—"} · {p.label}
+                  </span>
+                  <span className="shrink-0 tabular-nums">{formatCurrency(p.amount)}</span>
+                </div>
+              ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkConfirmOpen(false)} disabled={bulkWorking}>
+              Cancel
+            </Button>
+            <Button onClick={runBulkMarkPaid} disabled={bulkWorking}>
+              {bulkWorking ? <Loader2 className="size-4 animate-spin" /> : <CheckCheck className="size-4" />}
+              Mark {bulkIds.size} paid
             </Button>
           </DialogFooter>
         </DialogContent>

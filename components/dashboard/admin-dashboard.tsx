@@ -20,6 +20,7 @@ import {
   getGreeting,
   getRelativeTime,
   isOverdue,
+  formatCurrency,
   cn,
 } from "@/lib/utils";
 import type { ActivityItem } from "@/lib/actions/activity";
@@ -55,9 +56,14 @@ export function AdminDashboard({ firstName: _firstName }: AdminDashboardProps) {
   }
 
   const counters = [
-    { label: "Due today", value: data.counts.due_today, href: "/tasks", tone: "text-foreground" },
+    { label: "Due today", value: data.counts.due_today, href: "/tasks?status=DUE_TODAY", tone: "text-foreground" },
     { label: "Needs review", value: data.counts.needs_review, href: "/tasks?status=SUBMITTED", tone: "text-violet-600 dark:text-violet-400" },
-    { label: "Overdue", value: data.counts.overdue, href: "/tasks", tone: "text-destructive" },
+    { label: "Overdue", value: data.counts.overdue, href: "/tasks?status=OVERDUE", tone: "text-destructive" },
+    // §6 — real DB counters, never hardcoded
+    { label: "Pending payments", value: formatCurrency(data.counts.pending_payments), href: "/payments", tone: "text-amber-600 dark:text-amber-400" },
+    ...(data.counts.pending_approvals > 0
+      ? [{ label: "Pending approvals", value: data.counts.pending_approvals, href: "/employees", tone: "text-orange-600 dark:text-orange-400" }]
+      : []),
   ];
 
   return (
@@ -88,7 +94,7 @@ export function AdminDashboard({ firstName: _firstName }: AdminDashboardProps) {
       </div>
 
       {/* Counters */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {counters.map((c) => (
           <Link
             key={c.label}

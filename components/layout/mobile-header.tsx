@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell } from "lucide-react";
+import { Bell, Search } from "lucide-react";
 import { useNotifications } from "@/components/providers/notifications-provider";
 import { cn } from "@/lib/utils";
 
@@ -43,6 +43,15 @@ export function MobileHeader() {
     >
       <h1 className="text-base font-semibold tracking-tight">{title}</h1>
       <div className="flex items-center gap-1">
+        {/* §1/§21 — mobile search entry point (opens the shared dialog) */}
+        <button
+          type="button"
+          aria-label="Search"
+          onClick={() => window.dispatchEvent(new CustomEvent("taskora-open-search"))}
+          className="flex size-10 items-center justify-center rounded-full text-foreground transition-colors hover:bg-accent"
+        >
+          <Search className="size-5" strokeWidth={1.8} />
+        </button>
         <Link
           href="/notifications"
           aria-label={`Notifications${unreadCount > 0 ? ` (${unreadCount} unread)` : ""}`}

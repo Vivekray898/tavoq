@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { LogOut, Search, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { buttonVariants } from "@/components/ui/button";
+import { QuickCreate } from "@/components/shared/quick-create";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { SearchDialog } from "@/components/shared/search-dialog";
 import { NotificationBell } from "@/components/layout/notification-bell";
@@ -58,6 +59,9 @@ export function Topbar({ profile }: TopbarProps) {
       </button>
 
       <div className="flex-1" />
+
+      {/* §2 — global quick create (admin) */}
+      <QuickCreate />
 
       {/* §22 — bell with unread badge + popover, same source as the sidebar */}
       <NotificationBell />

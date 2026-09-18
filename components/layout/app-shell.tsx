@@ -5,6 +5,9 @@ import { AppSidebar } from "@/components/layout/app-sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { MobileHeader } from "@/components/layout/mobile-header";
 import { MobileNav } from "@/components/layout/mobile-nav";
+import { KeyboardShortcuts } from "@/components/shared/keyboard-shortcuts";
+import { MobileQuickCreate } from "@/components/shared/quick-create";
+import { SearchDialog } from "@/components/shared/search-dialog";
 import { cn } from "@/lib/utils";
 import type { Profile } from "@/types/database";
 
@@ -16,6 +19,7 @@ export function AppShell({
   children: React.ReactNode;
 }) {
   const [isOffline, setIsOffline] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
     function goOnline() {
@@ -64,6 +68,11 @@ export function AppShell({
       </div>
 
       <MobileNav role={profile.role} />
+      {/* §2/§20 — mobile quick actions + desktop shortcuts (session-gated) */}
+      <MobileQuickCreate />
+      <KeyboardShortcuts />
+      {/* Shell-level search dialog — reachable from the mobile header and shortcuts */}
+      <SearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
     </div>
   );
 }

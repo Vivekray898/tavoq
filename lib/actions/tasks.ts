@@ -9,7 +9,7 @@ import {
   sendEventEmail,
 } from "@/lib/notifications";
 import { ALLOWED_FILE_TYPES, MAX_FILE_SIZE } from "@/lib/constants";
-import type { ActionResponse, Task, TaskStatus } from "@/types/database";
+import type { ActionResponse, Task, TaskStatus, TaskPriority } from "@/types/database";
 
 // ──────────────────────────────────────────────
 // Shared query shape
@@ -986,6 +986,124 @@ export async function getProjectsForTask(): Promise<
     return { success: true, data: projects };
   } catch (err) {
     console.error("[getProjectsForTask] unexpected", err);
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+// ────────────────────────────────────────────
+// Bulk actions (admin) — one server round-trip
+// per field change instead of N single edits.
+// Same authorization as single-task actions.
+// ────────────────────────────────────────────
+
+export async function bulkUpdateTasks(
+  taskIds: string[],
+  changes: {
+    assigned_to?: string | null;
+    status?: TaskStatus;
+    priority?: TaskPriority;
+    project_id?: string;
+  }
+): Promise<ActionResponse<{ updated: number }>> {
+  try {
+    const profile = await requireAdmin();
+    const supabase = await createClient();
+
+    if (taskIds.length === 0) return { success: false, error: "No tasks selected" };
+    if (taskIds.length > 50) return { success: false, error: "Select at most 50 tasks" };
+
+    const update: Record<string, unknown> = {};
+
+    if (changes.assigned_to !== undefined) {
+      if (changes.assigned_to) {
+        const { data: assignee } = await supabase
+          .from("profiles")
+          .select("status, role")
+          .eq("id", changes.assigned_to)
+          .single();
+        if (!assignee || assignee.status !== "ACTIVE" || assignee.role !== "EMPLOYEE") {
+          return { success: false, error: "Tasks can only be assigned to active employees" };
+        }
+      }
+      update.assigned_to = changes.assigned_to || null;
+    }
+
+    if (changes.status) {
+      // Admin transitions — same rules as updateTaskStatus.
+      const allowed =
+        changes.status === "TODO" ||
+        changes.status === "IN_PROGRESS" ||
+        changes.status === "COMPLETED";
+      if (!allowed) {
+        return {
+          success: false,
+          error: "Bulk status change only supports To do, In progress or Completed",
+        };
+      }
+      update.status = changes.status;
+      if (changes.status === "COMPLETED") update.completed_at = new Date().toISOString();
+    }
+
+    if (changes.priority) update.priority = changes.priority;
+
+    if (changes.project_id) {
+      const { data: project } = await supabase
+        .from("projects")
+        .select("status")
+        .eq("id", changes.project_id)
+        .single();
+      if (!project) return { success: false, error: "Project not found" };
+      if (project.status === "ARCHIVED") {
+        return { success: false, error: "That project is archived" };
+      }
+      update.project_id = changes.project_id;
+    }
+
+    if (Object.keys(update).length === 0) {
+      return { success: false, error: "Nothing to change" };
+    }
+
+    const { data, error } = await supabase
+      .from("tasks")
+      .update(update)
+      .in("id", taskIds)
+      .select("id");
+
+    if (error) {
+      console.error("[bulkUpdateTasks]", error);
+      const msg = error.message.includes("allowed status transition")
+        ? "Some tasks can't move to that status — try Completed or In progress"
+        : "Failed to update the selected tasks";
+      return { success: false, error: msg };
+    }
+
+    // Assignment notifications — same payload as single edit, batched
+    if (changes.assigned_to) {
+      const { data: targets } = await supabase
+        .from("tasks")
+        .select("id, title, assigned_to")
+        .in("id", taskIds);
+      const newlyAssigned = (targets ?? []).filter(
+        (t: { assigned_to: string | null }) => t.assigned_to === changes.assigned_to
+      );
+      if (newlyAssigned.length > 0) {
+        await createNotification({
+          userId: changes.assigned_to,
+          type: "TASK_ASSIGNED",
+          title: "New task assignment",
+          message:
+            newlyAssigned.length === 1
+              ? `You were assigned "${newlyAssigned[0].title}"`
+              : `You were assigned ${newlyAssigned.length} tasks`,
+          referenceType: "task",
+          referenceId: newlyAssigned[0].id,
+        });
+      }
+    }
+
+    return { success: true, data: { updated: data?.length ?? 0 } };
+  } catch (err) {
+    console.error("[bulkUpdateTasks] unexpected", err);
     return { success: false, error: "Unauthorized" };
   }
 }

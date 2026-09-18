@@ -165,6 +165,55 @@ export default function ClientDetailPage() {
           )}
         </section>
 
+        {/* §17 — operational summary; numbers link to filtered views */}
+        <section>
+          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Overview
+          </h2>
+          <div className="grid grid-cols-4 gap-2">
+            {[
+              {
+                label: "Projects",
+                value: client.projects.length,
+                href: null,
+              },
+              {
+                label: "Active tasks",
+                value: client.task_stats.active,
+                href: client.task_stats.active > 0 ? "/tasks" : null,
+              },
+              {
+                label: "Completed",
+                value: client.task_stats.completed,
+                href: client.task_stats.completed > 0 ? "/tasks?status=COMPLETED" : null,
+              },
+              {
+                label: "Overdue",
+                value: client.task_stats.overdue,
+                href:
+                  client.task_stats.overdue > 0
+                    ? `/tasks?status=OVERDUE`
+                    : null,
+                tone: client.task_stats.overdue > 0 ? "text-destructive" : undefined,
+              },
+            ].map((s) => {
+              const body = (
+                <div className="rounded-xl border bg-card px-2 py-3 text-center">
+                  <p className={cn("text-lg font-semibold tabular-nums", s.tone)}>{s.value}</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">{s.label}</p>
+                </div>
+              );
+              return s.href ? (
+                <Link key={s.label} href={s.href} className="transition-opacity hover:opacity-80">
+                  {body}
+                </Link>
+              ) : (
+                <div key={s.label}>{body}</div>
+              );
+            })}
+          </div>
+        </section>
+
         {/* Projects */}
         <section>
           <div className="mb-3 flex items-center justify-between">

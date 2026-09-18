@@ -745,3 +745,154 @@ export async function getMyEarnings(
     return { success: false, error: "Unauthorized" };
   }
 }
+
+// ──────────────────────────────────────────────
+// §8 — Bulk mark-paid: one round-trip for a
+// selection of pending payments. Returns the
+// canonical rows so the client can patch caches.
+// ──────────────────────────────────────────────
+
+export async function markPaymentsPaidBatch(
+  paymentIds: string[],
+  paymentNote?: string
+): Promise<
+  ActionResponse<{
+    marked: number;
+    totalAmount: number;
+    items: Array<{ id: string; amount: number; paid_at: string }>;
+  }>
+> {
+  try {
+    const profile = await requireAdmin();
+    const supabase = await createClient();
+
+    if (paymentIds.length === 0) return { success: false, error: "No payments selected" };
+    if (paymentIds.length > 100) return { success: false, error: "Select at most 100 payments" };
+
+    const { data: rows, error } = await supabase
+      .from("payments")
+      .select(
+        `id, task_id, employee_id, description, amount, paid_at, payment_note,
+         employee:profiles!payments_employee_id_fkey(full_name, email),
+         task:tasks(id, title)`
+      )
+      .in("id", paymentIds)
+      .is("paid_at", null);
+
+    if (error) {
+      console.error("[markPaymentsPaidBatch] load", error);
+      return { success: false, error: "Failed to load the selected payments" };
+    }
+
+    type BatchRow = {
+      id: string;
+      task_id: string | null;
+      description: string | null;
+      amount: number | string;
+      payment_note: string | null;
+      employee: { full_name: string; email: string }[] | { full_name: string; email: string } | null;
+      task: { id: string; title: string }[] | { id: string; title: string } | null;
+    };
+
+    const payable = (rows ?? []) as unknown as BatchRow[];
+    if (payable.length === 0) {
+      return { success: false, error: "Those payments are already paid" };
+    }
+
+    const paidAt = new Date().toISOString();
+    const ids = payable.map((r) => r.id);
+    const { error: updateError } = await supabase
+      .from("payments")
+      .update({ paid_at: paidAt, paid_by: profile.id })
+      .in("id", ids);
+
+    if (updateError) {
+      console.error("[markPaymentsPaidBatch] update", updateError);
+      return { success: false, error: "Couldn't mark the payments as paid" };
+    }
+
+    // Only append the note where one doesn't exist yet
+    if (paymentNote) {
+      await supabase
+        .from("payments")
+        .update({ payment_note: paymentNote })
+        .in(
+          "id",
+          ids.filter((id) => {
+            const row = payable.find((r) => r.id === id);
+            return !!row && !row.payment_note;
+          })
+        );
+    }
+
+    const totalAmount = payable.reduce((sum, r) => sum + Number(r.amount), 0);
+
+    // One email per employee, summarising their share of the batch
+    const byEmail = new Map<
+      string,
+      { name: string; amount: number; count: number; firstLabel: string }
+    >();
+    for (const raw of payable) {
+      const employee = one(raw.employee);
+      if (!employee?.email) continue;
+      const entry = byEmail.get(employee.email) ?? {
+        name: employee.full_name,
+        amount: 0,
+        count: 0,
+        firstLabel: raw.task_id ? (one(raw.task)?.title ?? "Task") : (raw.description ?? "Payment"),
+      };
+      entry.amount += Number(raw.amount);
+      entry.count += 1;
+      byEmail.set(employee.email, entry);
+    }
+    for (const [email, entry] of byEmail) {
+      void sendEventEmail("PAYMENT_PAID", {
+        to: email,
+        employeeName: entry.name,
+        taskTitle: entry.count === 1 ? entry.firstLabel : `${entry.count} payments`,
+        amount: entry.amount,
+        paymentNote,
+      });
+    }
+
+    return {
+      success: true,
+      data: {
+        marked: payable.length,
+        totalAmount,
+        items: payable.map((r) => ({ id: r.id, amount: Number(r.amount), paid_at: paidAt })),
+      },
+    };
+  } catch (err) {
+    console.error("[markPaymentsPaidBatch] unexpected", err);
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+/** §10 — lightweight note editing on any payment. */
+export async function updatePaymentNote(
+  paymentId: string,
+  note: string
+): Promise<ActionResponse<{ payment_note: string | null }>> {
+  try {
+    await requireAdmin();
+    const supabase = await createClient();
+
+    const trimmed = note.trim();
+    const { data, error } = await supabase
+      .from("payments")
+      .update({ payment_note: trimmed || null })
+      .eq("id", paymentId)
+      .select("payment_note")
+      .single();
+
+    if (error) {
+      console.error("[updatePaymentNote]", error);
+      return { success: false, error: "Couldn't save the note" };
+    }
+
+    return { success: true, data: { payment_note: (data as { payment_note: string | null }).payment_note } };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}

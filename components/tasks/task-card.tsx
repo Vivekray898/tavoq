@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Paperclip, MessageSquare, CheckSquare } from "lucide-react";
-import { cn, formatDeadline, isOverdue } from "@/lib/utils";
+import { cn, formatDeadline, getRelativeTime, isOverdue } from "@/lib/utils";
 import { StatusDot, PriorityTag } from "@/components/shared/status-dot";
 import { LABEL_CHIP } from "@/lib/constants";
 import type { TaskStatus } from "@/types/database";
@@ -25,6 +25,8 @@ interface TaskCardProps {
   subtasksTotal?: number;
   commentsCount?: number;
   attachmentsCount?: number;
+  /** §12 — relative "updated x ago" from the existing timestamp */
+  updatedAt?: string | null;
   compact?: boolean;
   className?: string;
 }
@@ -47,6 +49,7 @@ export function TaskCard({
   subtasksTotal = 0,
   commentsCount = 0,
   attachmentsCount = 0,
+  updatedAt,
   compact,
   className,
 }: TaskCardProps) {
@@ -122,6 +125,11 @@ export function TaskCard({
           <span className="flex items-center gap-0.5 text-xs text-muted-foreground">
             <MessageSquare className="size-3" />
             {commentsCount}
+          </span>
+        )}
+        {updatedAt && (
+          <span className="text-xs text-muted-foreground/80">
+            Updated {getRelativeTime(updatedAt)}
           </span>
         )}
         {assignedName && (
