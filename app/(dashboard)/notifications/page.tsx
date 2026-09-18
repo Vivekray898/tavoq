@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -45,14 +44,10 @@ export default function NotificationsPage() {
     unreadCount,
     markRead,
     markAllRead,
-    refresh,
   } = useNotifications();
 
-  // Silent refresh when the page mounts so anything created on the
-  // server (e.g. while the tab was closed) shows up immediately
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
+  // No mount-time refresh — the shared cache is seeded by the provider and
+  // kept live by realtime (§7). Returning here is instant from cache.
 
   // Group by Today / Yesterday / Earlier (§16)
   const groups: Array<{ label: string; items: typeof notifications }> = [];

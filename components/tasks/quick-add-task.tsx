@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Loader2, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,7 +41,6 @@ interface EmployeeOption {
  * Everything else lives in the full form behind "More options".
  */
 export function QuickAddTask({ projectId, className, onCreated }: QuickAddTaskProps) {
-  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
@@ -99,7 +97,8 @@ export function QuickAddTask({ projectId, className, onCreated }: QuickAddTaskPr
     if (result.success && result.data) {
       close();
       onCreated?.(result.data as unknown as TaskListItem);
-      router.refresh();
+      // No router.refresh — the parent list updates via targeted
+      // invalidation; realtime also patches other open clients.
     } else {
       setError(result.error ?? "Couldn't create the task");
     }

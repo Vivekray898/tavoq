@@ -1,7 +1,9 @@
 import { redirect } from "next/navigation";
 import { requireAuthenticatedProfile } from "@/lib/auth";
 import { AppShell } from "@/components/layout/app-shell";
+import { SessionProvider } from "@/components/providers/session-provider";
 import { NotificationsProvider } from "@/components/providers/notifications-provider";
+import { RealtimeProvider } from "@/components/providers/realtime-provider";
 
 export default async function DashboardLayout({
   children,
@@ -19,8 +21,12 @@ export default async function DashboardLayout({
   } as typeof profile & { role: NonNullable<typeof profile.role> };
 
   return (
-    <NotificationsProvider userId={activeProfile.id}>
-      <AppShell profile={activeProfile}>{children}</AppShell>
-    </NotificationsProvider>
+    <SessionProvider profile={activeProfile}>
+      <RealtimeProvider userId={activeProfile.id}>
+        <NotificationsProvider>
+          <AppShell profile={activeProfile}>{children}</AppShell>
+        </NotificationsProvider>
+      </RealtimeProvider>
+    </SessionProvider>
   );
 }

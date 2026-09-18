@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
+import { useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ interface ClientFormProps {
 
 export function ClientForm({ client, mode }: ClientFormProps) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
 
   const {
@@ -50,8 +52,9 @@ export function ClientForm({ client, mode }: ClientFormProps) {
 
     if (result.success) {
       toast.success(mode === "create" ? "Client created" : "Client updated");
+      // Targeted invalidation instead of a full route refresh (§11).
+      await queryClient.invalidateQueries({ queryKey: ["clients"] });
       router.push(mode === "create" ? "/clients" : `/clients/${client?.id}`);
-      router.refresh();
     } else {
       toast.error(result.error || "Something went wrong");
     }

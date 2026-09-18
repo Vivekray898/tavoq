@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   DndContext,
   DragOverlay,
@@ -17,7 +18,7 @@ import {
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { toast } from "sonner";
 import { Paperclip, MessageSquare, CheckSquare } from "lucide-react";
-import { updateTaskStatus, type TaskListItem } from "@/lib/actions/tasks";
+import { updateTaskStatus, type TaskListItem, type TaskDetail } from "@/lib/actions/tasks";
 import {
   TASK_STATUSES,
   TASK_STATUS_LABELS,
@@ -27,21 +28,23 @@ import {
 } from "@/lib/constants";
 import { formatDeadline, formatCurrency, isOverdue, cn, getInitials } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { qk } from "@/lib/queries/keys";
 import type { TaskStatus } from "@/types/database";
 
 interface BoardProps {
   tasks: TaskListItem[];
   currentUserId: string;
   isAdmin: boolean;
-  onChanged?: () => void;
 }
 
 /**
  * §7 Kanban board — five status columns, drag-and-drop with optimistic
  * update and rollback on failure. Transitions are validated client-side
- * (mirroring §28) and enforced server-side.
+ * (mirroring §28) and enforced server-side. Success writes the confirmed
+ * status into the shared cache — no list refetch needed.
  */
-export function BoardView({ tasks, currentUserId, isAdmin, onChanged }: BoardProps) {
+export function BoardView({ tasks, currentUserId, isAdmin }: BoardProps) {
+  const queryClient = useQueryClient();
   const [items, setItems] = useState<TaskListItem[]>(tasks);
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -128,12 +131,26 @@ export function BoardView({ tasks, currentUserId, isAdmin, onChanged }: BoardPro
       return;
     }
 
+    // Targeted cache writes — the board already shows the optimistic
+    // state; the shared list + open detail just follow it.
+    queryClient.setQueriesData<TaskListItem[]>({ queryKey: qk.tasks() }, (list) =>
+      Array.isArray(list)
+        ? list.map((t) =>
+            t.id === taskId
+              ? { ...t, status: result.data!.status, updated_at: result.data!.updated_at }
+              : t
+          )
+        : list
+    );
+    queryClient.setQueryData<TaskDetail>(qk.taskDetail(taskId), (prev) =>
+      prev ? { ...prev, status: result.data!.status, updated_at: result.data!.updated_at } : prev
+    );
+
     if (targetStatus === "COMPLETED") {
       toast.success("Task approved");
     } else if (targetStatus === "SUBMITTED") {
       toast.success("Submitted for review");
     }
-    onChanged?.();
   }
 
   return (

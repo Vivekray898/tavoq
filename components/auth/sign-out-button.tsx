@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { Loader2, LogOut } from "lucide-react";
 import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
@@ -9,6 +10,7 @@ import { Button } from "@/components/ui/button";
 
 export function SignOutButton() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
 
   async function signOut() {
@@ -21,6 +23,8 @@ export function SignOutButton() {
       return;
     }
 
+    // Clear every user-specific cache entry + unsubscribe realtime (§19).
+    queryClient.clear();
     router.replace("/login");
     router.refresh();
   }

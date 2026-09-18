@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Archive,
@@ -36,13 +37,16 @@ import { SkeletonPage } from "@/components/shared/skeleton-loader";
 import { TaskCard } from "@/components/tasks/task-card";
 import { EmptyState } from "@/components/shared/empty-state";
 import { ActivityTimeline } from "@/components/tasks/activity-timeline";
-import { createClient } from "@/lib/supabase/client";
 import {
-  getProject,
   addProjectResource,
   deleteProjectResource,
   archiveProjectAction,
 } from "@/lib/actions/projects";
+import {
+  projectDetailOptions,
+} from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
+import { useSession } from "@/components/providers/session-provider";
 import {
   formatDate,
   getInitials,
@@ -65,12 +69,22 @@ type Tab = "overview" | "tasks" | "resources" | "activity";
 export default function ProjectDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const projectId = params.id as string;
-  const [project, setProject] = useState<ProjectDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { role } = useSession();
+  const isAdmin = role === "ADMIN";
+
+  // Cached detail — revisiting a project reads cache instantly (§3).
+  const projectQuery = useQuery(projectDetailOptions(projectId));
+  const project = projectQuery.data ?? null;
+  const loading = projectQuery.isLoading;
+  const error = projectQuery.isError
+    ? projectQuery.error instanceof Error
+      ? projectQuery.error.message
+      : "Project not found"
+    : null;
+
   const [tab, setTab] = useState<Tab>("overview");
-  const [isAdmin, setIsAdmin] = useState(false);
 
   // Add resource dialog
   const [resOpen, setResOpen] = useState(false);
@@ -81,35 +95,6 @@ export default function ProjectDetailPage() {
   const [addingRes, setAddingRes] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiving, setArchiving] = useState(false);
-
-  const load = useCallback(async () => {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (user) {
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
-      if (profile) setIsAdmin(profile.role === "ADMIN");
-    }
-
-    const result = await getProject(projectId);
-    if (result.success && result.data) {
-      setProject(result.data);
-      setError(null);
-    } else {
-      setError(result.error ?? "Project not found");
-    }
-    setLoading(false);
-  }, [projectId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch on mount
-    void load();
-  }, [load]);
 
   if (loading) return <SkeletonPage />;
 
@@ -140,7 +125,7 @@ export default function ProjectDetailPage() {
     });
     setAddingRes(false);
     if (result.success && result.data) {
-      setProject((prev) =>
+      queryClient.setQueryData<ProjectDetail>(qk.projectDetail(projectId), (prev) =>
         prev ? { ...prev, resources: [...prev.resources, result.data!] } : prev
       );
       setResOpen(false);
@@ -157,7 +142,7 @@ export default function ProjectDetailPage() {
   async function handleDeleteResource(id: string) {
     const result = await deleteProjectResource(id);
     if (result.success) {
-      setProject((prev) =>
+      queryClient.setQueryData<ProjectDetail>(qk.projectDetail(projectId), (prev) =>
         prev ? { ...prev, resources: prev.resources.filter((r) => r.id !== id) } : prev
       );
       toast.success("Resource removed");
@@ -175,8 +160,9 @@ export default function ProjectDetailPage() {
       return;
     }
     toast.success("Project archived");
+    // Targeted cache cleanup — the projects list refetches when next shown.
+    queryClient.removeQueries({ queryKey: qk.projectDetail(projectId) });
     router.push("/projects");
-    router.refresh();
   }
 
   const counts = project.task_counts;
@@ -512,4 +498,3 @@ export default function ProjectDetailPage() {
     </div>
   );
 }
-

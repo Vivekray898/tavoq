@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,65 +12,21 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
-import { createClient } from "@/lib/supabase/client";
-import {
-  getMyEarnings,
-  type EarningsData,
-  type PaymentItem,
-} from "@/lib/actions/payments";
+import { myEarningsOptions } from "@/lib/queries/options";
 import { formatCurrency, cn } from "@/lib/utils";
+import type { PaymentItem } from "@/lib/actions/payments";
 
 /**
  * §26/§27/§70 — employee earnings, mobile-first.
  * "How much did I earn?" — big numbers, week switcher, day groups.
+ * Each viewed week is its own cache entry, so paging back and forth
+ * between weeks never refetches (§3).
  */
 export function EmployeePaymentsView() {
-  const [data, setData] = useState<EarningsData | null>(null);
-  const [loading, setLoading] = useState(true);
   const [weekOffset, setWeekOffset] = useState(0);
   const [detail, setDetail] = useState<PaymentItem | null>(null);
 
-  const load = useCallback(async (offset: number) => {
-    setLoading(true);
-    const result = await getMyEarnings(offset);
-    if (result.success && result.data) {
-      setData(result.data);
-    } else if (result.error && result.error !== "Unauthorized") {
-      toast.error(result.error);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.resolve().then(() => {
-      if (!cancelled) void load(weekOffset);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [weekOffset, load]);
-
-  // Realtime: my payments change → refresh
-  useEffect(() => {
-    const supabase = createClient();
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const channel = supabase
-      .channel("my-earnings")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "payments" },
-        () => {
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(() => void load(weekOffset), 400);
-        }
-      )
-      .subscribe();
-    return () => {
-      if (timer) clearTimeout(timer);
-      supabase.removeChannel(channel);
-    };
-  }, [weekOffset, load]);
+  const { data, isLoading, isError } = useQuery(myEarningsOptions(weekOffset));
 
   const isCurrentWeek = weekOffset === 0;
   const weekLabel = (() => {
@@ -94,11 +50,15 @@ export function EmployeePaymentsView() {
       </div>
 
       {/* Summary (§26) */}
-      {loading && !data ? (
+      {isLoading && !data ? (
         <div className="grid grid-cols-3 gap-3">
           <div className="h-24 animate-pulse rounded-xl bg-muted" />
           <div className="h-24 animate-pulse rounded-xl bg-muted" />
           <div className="h-24 animate-pulse rounded-xl bg-muted" />
+        </div>
+      ) : isError ? (
+        <div className="rounded-xl border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
+          Couldn&apos;t load your payments. Check your connection and try again.
         </div>
       ) : data ? (
         <div className="grid grid-cols-3 gap-3">
@@ -163,7 +123,7 @@ export function EmployeePaymentsView() {
       </div>
 
       {/* Day groups (§27) */}
-      {loading ? (
+      {isLoading ? (
         <SkeletonList rows={4} />
       ) : !data || data.days.length === 0 ? (
         <div className="rounded-xl border bg-card px-4 py-10 text-center">

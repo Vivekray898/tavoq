@@ -1,73 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, CheckCircle2, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TaskCard } from "@/components/tasks/task-card";
-import { createClient } from "@/lib/supabase/client";
-import {
-  getEmployeeDashboard,
-  type EmployeeDashboardData,
-} from "@/lib/actions/dashboard";
+import { employeeDashboardOptions } from "@/lib/queries/options";
 import { getGreeting, getRelativeTime } from "@/lib/utils";
 
 interface EmployeeDashboardProps {
   firstName: string;
 }
 
+/**
+ * §10 — cached dashboard for employees. My-task and payment events
+ * invalidate this key via the session RealtimeProvider while mounted;
+ * revisiting the dashboard serves cache instead of refetching (§3).
+ */
 export function EmployeeDashboard({ firstName }: EmployeeDashboardProps) {
-  const [data, setData] = useState<EmployeeDashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const fetchingRef = useRef(false);
+  const { data, isLoading } = useQuery(employeeDashboardOptions);
 
-  const refresh = useCallback(async () => {
-    if (fetchingRef.current) return;
-    fetchingRef.current = true;
-    try {
-      const result = await getEmployeeDashboard();
-      if (result.success && result.data) setData(result.data);
-    } finally {
-      fetchingRef.current = false;
-    }
-  }, []);
-
-  useEffect(() => {
-    refresh().finally(() => setLoading(false));
-  }, [refresh]);
-
-  // Realtime: my tasks change → refresh (scoped to assigned_to = me)
-  useEffect(() => {
-    const supabase = createClient();
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const schedule = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(refresh, 500);
-    };
-
-    const channel = supabase
-      .channel("employee-dashboard")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "tasks" },
-        schedule
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "payments" },
-        schedule
-      )
-      .subscribe();
-
-    return () => {
-      if (timer) clearTimeout(timer);
-      supabase.removeChannel(channel);
-    };
-  }, [refresh]);
-
-  if (loading || !data) {
+  if (isLoading || !data) {
     return (
       <div className="space-y-6">
         <SkeletonList rows={4} />

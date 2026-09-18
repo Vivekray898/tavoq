@@ -1,15 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useState } from "react";
 import Link from "next/link";
-import { Loader2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import {
-  getTaskActivity,
-  getProjectActivity,
-  type ActivityItem,
-} from "@/lib/actions/activity";
+import { taskActivityOptions, projectActivityOptions } from "@/lib/queries/options";
 import { formatActivityText } from "@/lib/activity-format";
 import { getInitials, getRelativeTime } from "@/lib/utils";
 
@@ -25,8 +21,8 @@ interface ActivityTimelineProps {
 /**
  * §30 — real activity stream (backed by DB triggers, not synthesized).
  *
- * Loads `pageSize` items first and reveals more on demand so the
- * section never dominates the task page.
+ * Each window size is its own cache entry, so expanding the timeline
+ * reads the next cached window instead of refetching from scratch (§3).
  */
 export function ActivityTimeline({
   taskId,
@@ -34,55 +30,29 @@ export function ActivityTimeline({
   pageSize = 5,
   maxItems = 50,
 }: ActivityTimelineProps) {
-  const [items, setItems] = useState<ActivityItem[] | null>(null);
-  const [error, setError] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [limit, setLimit] = useState(pageSize);
 
-  // Reset and fetch the first page whenever the scope changes.
-  useEffect(() => {
-    let cancelled = false;
-    setItems(null);
-    setError(false);
-    (async () => {
-      const result = taskId
-        ? await getTaskActivity(taskId, pageSize)
-        : projectId
-          ? await getProjectActivity(projectId, pageSize)
-          : { success: false as const };
-      if (cancelled) return;
-      if (result.success && result.data) {
-        setItems(result.data);
-      } else {
-        setError(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [taskId, projectId, pageSize]);
+  const options = taskId
+    ? taskActivityOptions(taskId, limit)
+    : projectId
+      ? projectActivityOptions(projectId, limit)
+      : null;
 
-  const loadMore = useCallback(async () => {
-    if (!items || loadingMore) return;
-    setLoadingMore(true);
-    const nextLimit = Math.min(items.length + pageSize, maxItems);
-    const result = taskId
-      ? await getTaskActivity(taskId, nextLimit)
-      : projectId
-        ? await getProjectActivity(projectId, nextLimit)
-        : { success: false as const };
-    if (result.success && result.data) {
-      setItems(result.data);
+  const { data: items, isLoading, isError } = useQuery(
+    options ?? {
+      queryKey: ["activity", "none"] as const,
+      queryFn: () => Promise.resolve([]),
+      enabled: false,
     }
-    setLoadingMore(false);
-  }, [items, loadingMore, pageSize, maxItems, taskId, projectId]);
+  );
 
-  if (error) {
+  if (isError) {
     return (
       <p className="text-sm text-muted-foreground">Couldn&apos;t load activity.</p>
     );
   }
 
-  if (!items) {
+  if (isLoading || !items) {
     return (
       <div className="space-y-3">
         {[...Array(3)].map((_, i) => (
@@ -103,7 +73,7 @@ export function ActivityTimeline({
     );
   }
 
-  const canLoadMore = items.length >= pageSize && items.length < maxItems;
+  const canLoadMore = items.length >= limit && limit < maxItems;
 
   return (
     <div className="space-y-3.5">
@@ -147,18 +117,10 @@ export function ActivityTimeline({
             type="button"
             variant="ghost"
             size="sm"
-            onClick={loadMore}
-            disabled={loadingMore}
+            onClick={() => setLimit((l) => Math.min(l + pageSize * 3, maxItems))}
             className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
           >
-            {loadingMore ? (
-              <>
-                <Loader2 className="size-3.5 animate-spin" />
-                Loading…
-              </>
-            ) : (
-              "Show more"
-            )}
+            Show more
           </Button>
         </div>
       )}

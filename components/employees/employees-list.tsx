@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Loader2, Mail, Send, Trash2, Users, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -23,26 +24,41 @@ import {
 } from "@/components/ui/select";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { EmptyState } from "@/components/shared/empty-state";
-import {
-  getTeamMembers,
-  manageProfileAction,
-  type TeamMember,
-} from "@/lib/actions/employees";
+import { manageProfileAction, type TeamMember } from "@/lib/actions/employees";
 import {
   getInvitations,
   inviteEmployeeAction,
   revokeInvitation,
   type Invitation,
 } from "@/lib/actions/invitations";
+import {
+  teamMembersOptions,
+} from "@/lib/queries/options";
 import { formatDate } from "@/lib/utils";
 import { toast } from "sonner";
 
 type TeamTab = "ACTIVE" | "PENDING" | "SUSPENDED";
 type TeamAction = "APPROVE" | "REJECT" | "SUSPEND" | "REACTIVATE" | "ROLE_CHANGED";
 
+const invitationsOptions = {
+  queryKey: ["invitations"] as const,
+  queryFn: async () => {
+    const res = await getInvitations();
+    if (!res.success || !res.data) throw new Error(res.error ?? "Failed to load invitations");
+    return res.data as Invitation[];
+  },
+  staleTime: 120_000,
+};
+
 export function EmployeesList() {
-  const [members, setMembers] = useState<TeamMember[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const teamQuery = useQuery(teamMembersOptions);
+  const invitesQuery = useQuery(invitationsOptions);
+
+  const members = teamQuery.data ?? [];
+  const invitations = invitesQuery.data ?? [];
+  const loading = teamQuery.isLoading;
+
   const [tab, setTab] = useState<TeamTab>("ACTIVE");
   const [pendingAction, setPendingAction] = useState<{
     member: TeamMember;
@@ -50,32 +66,11 @@ export function EmployeesList() {
     role?: "ADMIN" | "EMPLOYEE";
   } | null>(null);
   const [working, setWorking] = useState(false);
-  const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"EMPLOYEE" | "ADMIN">("EMPLOYEE");
   const [inviting, setInviting] = useState(false);
   const [lastInviteUrl, setLastInviteUrl] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    const [membersRes, invitesRes] = await Promise.all([
-      getTeamMembers(),
-      getInvitations(),
-    ]);
-    if (membersRes.success && membersRes.data) setMembers(membersRes.data);
-    if (invitesRes.success && invitesRes.data) setInvitations(invitesRes.data);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.resolve().then(() => {
-      if (!cancelled) void load();
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [load]);
 
   async function confirmAction() {
     if (!pendingAction) return;
@@ -92,8 +87,9 @@ export function EmployeesList() {
       return;
     }
 
-    setMembers((current) =>
-      current.map((member) =>
+    // Targeted: patch the changed member in the cached team list.
+    queryClient.setQueryData<TeamMember[]>(teamMembersOptions.queryKey, (current) =>
+      current?.map((member) =>
         member.id === result.data?.id ? { ...member, ...result.data } : member
       )
     );
@@ -182,7 +178,9 @@ export function EmployeesList() {
                     onClick={async () => {
                       const res = await revokeInvitation(invitation.id);
                       if (res.success) {
-                        setInvitations((prev) => prev.filter((i) => i.id !== invitation.id));
+                        queryClient.setQueryData<Invitation[]>(invitationsOptions.queryKey, (prev) =>
+                          (prev ?? []).filter((i) => i.id !== invitation.id)
+                        );
                         toast.success("Invitation revoked");
                       } else {
                         toast.error(res.error ?? "Couldn't revoke the invitation");
@@ -351,7 +349,7 @@ export function EmployeesList() {
                 const tokenRes = await getInvitations();
                 const fresh = tokenRes.data?.find((i) => i.email === inviteEmail.toLowerCase().trim());
                 if (fresh) setLastInviteUrl(`${window.location.origin}/invite/${fresh.token}`);
-                await load();
+                await queryClient.invalidateQueries({ queryKey: invitationsOptions.queryKey });
                 setTab("PENDING");
               }}
             >

@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Calendar,
@@ -38,16 +39,19 @@ import { ActivityTimeline } from "@/components/tasks/activity-timeline";
 import { SubmitTaskDialog } from "@/components/tasks/submit-task-dialog";
 import { SkeletonPage } from "@/components/shared/skeleton-loader";
 import { StatusDot } from "@/components/shared/status-dot";
-import { createClient } from "@/lib/supabase/client";
 import {
-  getTask,
   updateTaskStatus,
   uploadTaskAttachment,
   deleteTaskAttachment,
   getAttachmentUrl,
   deleteTaskAction,
 } from "@/lib/actions/tasks";
-import { getLabels } from "@/lib/actions/task-extras";
+import {
+  taskDetailOptions,
+  labelsOptions,
+} from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
+import { useSession } from "@/components/providers/session-provider";
 import {
   formatDeadline,
   formatCurrency,
@@ -57,7 +61,7 @@ import {
   cn,
 } from "@/lib/utils";
 import type { TaskDetail } from "@/lib/actions/tasks";
-import type { Label, ResourceType } from "@/types/database";
+import type { ResourceType } from "@/types/database";
 
 const RESOURCE_ICONS: Record<ResourceType, typeof Globe> = {
   DRIVE: FileText,
@@ -72,13 +76,23 @@ export default function TaskDetailPage() {
   const params = useParams();
   const taskId = params.id as string;
   const router = useRouter();
+  const queryClient = useQueryClient();
+  const { userId: currentUserId, role } = useSession();
+  const userRole = role === "ADMIN" ? "ADMIN" : "EMPLOYEE";
 
-  const [task, setTask] = useState<TaskDetail | null>(null);
-  const [labels, setLabels] = useState<Label[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [notFound, setNotFound] = useState<string | null>(null);
-  const [currentUserId, setCurrentUserId] = useState("");
-  const [userRole, setUserRole] = useState<"ADMIN" | "EMPLOYEE">("EMPLOYEE");
+  // Cached detail — returning to a visited task reads cache instantly (§3).
+  const taskQuery = useQuery(taskDetailOptions(taskId));
+  const labelsQuery = useQuery(labelsOptions);
+
+  const task = taskQuery.data ?? null;
+  const labels = labelsQuery.data ?? [];
+  const loading = taskQuery.isLoading;
+  const notFound = taskQuery.isError
+    ? taskQuery.error instanceof Error
+      ? taskQuery.error.message
+      : "Task not found"
+    : null;
+
   const [updating, setUpdating] = useState(false);
   const [revisionOpen, setRevisionOpen] = useState(false);
   const [revisionNote, setRevisionNote] = useState("");
@@ -87,67 +101,22 @@ export default function TaskDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletingTask, setDeletingTask] = useState(false);
 
-  const load = useCallback(async () => {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (user) {
-      setCurrentUserId(user.id);
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
-      if (profile) setUserRole(profile.role);
-    }
+  function patchTask(updater: (prev: TaskDetail) => TaskDetail) {
+    queryClient.setQueryData<TaskDetail>(qk.taskDetail(taskId), (prev) =>
+      prev ? updater(prev) : prev
+    );
+  }
 
-    const result = await getTask(taskId);
-    if (result.success && result.data) {
-      setTask(result.data);
-      setNotFound(null);
-    } else {
-      setNotFound(result.error ?? "Task not found");
-    }
-    setLoading(false);
-  }, [taskId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- async fetch on mount
-    void load();
-    void getLabels().then((r) => {
-      if (r.success && r.data) setLabels(r.data);
-    });
-  }, [load]);
-
-  // Realtime: task row changes (status, etc.) → refetch
-  useEffect(() => {
-    if (!taskId) return;
-    const supabase = createClient();
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const channel = supabase
-      .channel(`task-detail:${taskId}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "tasks", filter: `id=eq.${taskId}` },
-        () => {
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(load, 400);
-        }
-      )
-      .subscribe();
-    return () => {
-      if (timer) clearTimeout(timer);
-      supabase.removeChannel(channel);
-    };
-  }, [taskId, load]);
-
-  async function handleStatus(status: Parameters<typeof updateTaskStatus>[1], note?: string) {
+  async function handleStatus(
+    status: Parameters<typeof updateTaskStatus>[1],
+    note?: string
+  ) {
     setUpdating(true);
     const result = await updateTaskStatus(taskId, status, note);
     setUpdating(false);
     if (result.success && result.data) {
-      setTask((prev) => (prev ? { ...prev, status: result.data!.status } : prev));
+      // Targeted: write the server-confirmed status into the cached task.
+      patchTask((prev) => ({ ...prev, status: result.data!.status }));
       toast.success(
         status === "SUBMITTED"
           ? "Submitted for review"
@@ -170,25 +139,21 @@ export default function TaskDetailPage() {
   async function uploadThenAttach(file: File): Promise<boolean> {
     const result = await uploadTaskAttachment(taskId, file);
     if (result.success && result.data) {
-      setTask((prev) =>
-        prev
-          ? {
-              ...prev,
-              attachments: [
-                ...prev.attachments,
-                {
-                  id: result.data!.id,
-                  file_name: result.data!.file_name,
-                  file_path: result.data!.file_path,
-                  file_size: file.size,
-                  mime_type: file.type || null,
-                  uploaded_by: currentUserId,
-                  created_at: new Date().toISOString(),
-                },
-              ],
-            }
-          : prev
-      );
+      patchTask((prev) => ({
+        ...prev,
+        attachments: [
+          ...prev.attachments,
+          {
+            id: result.data!.id,
+            file_name: result.data!.file_name,
+            file_path: result.data!.file_path,
+            file_size: file.size,
+            mime_type: file.type || null,
+            uploaded_by: currentUserId,
+            created_at: new Date().toISOString(),
+          },
+        ],
+      }));
       return true;
     }
     toast.error(result.error ?? `Couldn't upload ${file.name}`);
@@ -209,11 +174,10 @@ export default function TaskDetailPage() {
     const result = await deleteTaskAttachment(attId);
     setDeletingAttId(null);
     if (result.success) {
-      setTask((prev) =>
-        prev
-          ? { ...prev, attachments: prev.attachments.filter((a) => a.id !== attId) }
-          : prev
-      );
+      patchTask((prev) => ({
+        ...prev,
+        attachments: prev.attachments.filter((a) => a.id !== attId),
+      }));
       toast.success("File removed");
     } else {
       toast.error(result.error ?? "Couldn't remove the file");
@@ -229,8 +193,13 @@ export default function TaskDetailPage() {
       return;
     }
     toast.success("Task deleted");
+    // Targeted cache cleanup; realtime DELETE also covers other clients.
+    queryClient.setQueriesData<import("@/lib/actions/tasks").TaskListItem[]>(
+      { queryKey: qk.tasks() },
+      (list) => (Array.isArray(list) ? list.filter((t) => t.id !== taskId) : list)
+    );
+    queryClient.removeQueries({ queryKey: qk.taskDetail(taskId) });
     router.replace("/tasks");
-    router.refresh();
   }
 
   if (loading) return <SkeletonPage />;
@@ -255,8 +224,11 @@ export default function TaskDetailPage() {
   const isAdmin = userRole === "ADMIN";
 
   // Primary action logic (§12)
-  let primaryAction: { label: string; status: Parameters<typeof updateTaskStatus>[1]; dialog?: boolean } | null =
-    null;
+  let primaryAction: {
+    label: string;
+    status: Parameters<typeof updateTaskStatus>[1];
+    dialog?: boolean;
+  } | null = null;
   let secondaryAction: { label: string; status: Parameters<typeof updateTaskStatus>[1] } | null =
     null;
 
@@ -320,7 +292,7 @@ export default function TaskDetailPage() {
             current={task.labels}
             allLabels={labels}
             canEdit={isAdmin || isAssignee}
-            onChange={(next) => setTask((prev) => (prev ? { ...prev, labels: next } : prev))}
+            onChange={(next) => patchTask((prev) => ({ ...prev, labels: next }))}
           />
         </div>
       </div>
@@ -361,9 +333,7 @@ export default function TaskDetailPage() {
               taskId={task.id}
               initialSubtasks={task.subtasks}
               canEdit={isAdmin || isAssignee}
-              onChange={(next) =>
-                setTask((prev) => (prev ? { ...prev, subtasks: next } : prev))
-              }
+              onChange={(next) => patchTask((prev) => ({ ...prev, subtasks: next }))}
             />
           )}
 
@@ -426,12 +396,7 @@ export default function TaskDetailPage() {
                         {att.file_name}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        {[
-                          formatFileSize(att.file_size),
-                          getInitials(att.uploaded_by) && "",
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
+                        {formatFileSize(att.file_size)}
                       </p>
                     </button>
                     {(isAdmin || att.uploaded_by === currentUserId) && (
@@ -456,7 +421,7 @@ export default function TaskDetailPage() {
             )}
           </section>
 
-          {/* Comments (§13/§15) */}
+          {/* Comments (§13/§15) — realtime via the session provider */}
           <section>
             <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Conversation
@@ -466,9 +431,7 @@ export default function TaskDetailPage() {
               initialComments={task.comments}
               currentUserId={currentUserId}
               onAttachmentAdded={(att) =>
-                setTask((prev) =>
-                  prev ? { ...prev, attachments: [...prev.attachments, att] } : prev
-                )
+                patchTask((prev) => ({ ...prev, attachments: [...prev.attachments, att] }))
               }
             />
           </section>
@@ -525,7 +488,7 @@ export default function TaskDetailPage() {
               <>
                 <Separator />
                 <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
+                  <span className="flex items-center justify-between gap-2 text-muted-foreground">
                     Payment
                   </span>
                   <span

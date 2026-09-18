@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import { ThemeProvider } from "next-themes";
+import { QueryProvider } from "@/components/providers/query-provider";
 import { PwaBootstrap } from "@/components/shared/pwa-bootstrap";
 import "./globals.css";
 
@@ -65,9 +66,11 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          {children}
-          <PwaBootstrap />
-          <Toaster position="top-center" richColors closeButton />
+          <QueryProvider>
+            {children}
+            <PwaBootstrap />
+            <Toaster position="top-center" richColors closeButton />
+          </QueryProvider>
         </ThemeProvider>
       </body>
     </html>

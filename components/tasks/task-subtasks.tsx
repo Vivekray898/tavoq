@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Check, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { addSubtask, toggleSubtask, deleteSubtask } from "@/lib/actions/task-extras";
+import { qk } from "@/lib/queries/keys";
 import { cn } from "@/lib/utils";
 import type { TaskSubtask } from "@/types/database";
 
@@ -16,8 +18,11 @@ interface SubtasksProps {
 
 /**
  * §21 — lightweight checklist with progress (2/4 completed).
+ * Mutations update the shared task-detail cache directly; failures
+ * roll back and surface the real error (§24).
  */
 export function TaskSubtasks({ taskId, initialSubtasks, canEdit, onChange }: SubtasksProps) {
+  const queryClient = useQueryClient();
   const [subtasks, setSubtasks] = useState<TaskSubtask[]>(initialSubtasks);
   const [adding, setAdding] = useState(false);
   const [newTitle, setNewTitle] = useState("");
@@ -60,13 +65,10 @@ export function TaskSubtasks({ taskId, initialSubtasks, canEdit, onChange }: Sub
     const result = await deleteSubtask(id);
     if (!result.success) {
       toast.error(result.error ?? "Couldn't remove item");
-      void refetch();
+      // Targeted recovery: refetch just this task's detail instead of
+      // reloading the whole page.
+      await queryClient.invalidateQueries({ queryKey: qk.taskDetail(taskId) });
     }
-  }
-
-  async function refetch() {
-    // Simplest reliable rollback path
-    window.location.reload();
   }
 
   return (

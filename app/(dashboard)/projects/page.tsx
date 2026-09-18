@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, ArchiveRestore, Plus, FolderKanban, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -16,73 +17,40 @@ import {
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { EmptyState } from "@/components/shared/empty-state";
 import {
-  getProjects,
   archiveProjectAction,
   restoreProjectAction,
   deleteProjectAction,
 } from "@/lib/actions/projects";
-import { getMyRole } from "@/lib/actions/session";
+import {
+  projectsListOptions,
+} from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
+import { useSession } from "@/components/providers/session-provider";
 import { cn } from "@/lib/utils";
-
-interface ProjectRow {
-  id: string;
-  name: string;
-  client_name: string | null;
-  status: string;
-  active_tasks: number;
-}
 
 type ProjectsTab = "active" | "archived";
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<ProjectRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const queryClient = useQueryClient();
+  const { role } = useSession();
+  const isAdmin = role === "ADMIN";
   const [tab, setTab] = useState<ProjectsTab>("active");
-  const [confirmDelete, setConfirmDelete] = useState<ProjectRow | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<(typeof projects)[number] | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const load = useCallback(async (archived: boolean) => {
-    setLoading(true);
-    const projectsRes = await getProjects({ archived });
-    if (projectsRes.success && projectsRes.data) {
-      setProjects(
-        projectsRes.data.map((p) => ({
-          id: p.id,
-          name: p.name,
-          client_name: p.client_name,
-          status: p.status,
-          active_tasks: p.active_tasks,
-        }))
-      );
-    } else {
-      setProjects([]);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      const me = await getMyRole();
-      setIsAdmin(me.success && me.data?.role === "ADMIN");
-    })();
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.resolve().then(() => {
-      if (!cancelled) void load(tab === "archived");
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, load]);
+  // Each tab is its own cache entry — switching Active ⇄ Archived never
+  // refetches a tab that was already loaded (§3).
+  const activeQuery = useQuery(projectsListOptions(false));
+  const archivedQuery = useQuery(projectsListOptions(true));
+  const projects = (tab === "active" ? activeQuery.data : archivedQuery.data) ?? [];
+  const loading = tab === "active" ? activeQuery.isLoading : archivedQuery.isLoading;
 
   async function handleRestore(id: string) {
     const result = await restoreProjectAction(id);
     if (result.success) {
       toast.success("Project restored to active");
-      void load(tab === "archived");
+      // Targeted: refresh only the two project lists.
+      await queryClient.invalidateQueries({ queryKey: ["projects", "list"], refetchType: "active" });
     } else {
       toast.error(result.error ?? "Couldn't restore the project");
     }
@@ -92,7 +60,7 @@ export default function ProjectsPage() {
     const result = await archiveProjectAction(id);
     if (result.success) {
       toast.success("Project archived");
-      void load(tab === "archived");
+      await queryClient.invalidateQueries({ queryKey: ["projects", "list"], refetchType: "active" });
     } else {
       toast.error(result.error ?? "Couldn't archive the project");
     }
@@ -106,7 +74,10 @@ export default function ProjectsPage() {
     if (result.success) {
       toast.success("Project deleted permanently");
       setConfirmDelete(null);
-      void load(true);
+      queryClient.setQueryData(qk.projectsList(true), (prev: typeof projects | undefined) =>
+        prev ? prev.filter((p) => p.id !== confirmDelete.id) : prev
+      );
+      queryClient.removeQueries({ queryKey: qk.projectDetail(confirmDelete.id) });
     } else {
       toast.error(result.error ?? "Couldn't delete the project");
     }

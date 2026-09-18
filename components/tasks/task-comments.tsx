@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Loader2, Paperclip, SendHorizontal } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
 import { addCommentAction } from "@/lib/actions/comments";
 import { uploadTaskAttachment } from "@/lib/actions/tasks";
+import { taskDetailOptions } from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
 import { getInitials, formatTime, cn } from "@/lib/utils";
 import type { TaskDetail } from "@/lib/actions/tasks";
 
@@ -25,7 +27,11 @@ interface TaskCommentsProps {
 
 /**
  * Conversation-style task communication (§13, §14).
- * Realtime scoped to this task; cleaned up on unmount (§46).
+ *
+ * Messages are read from the shared task-detail cache — realtime INSERTs
+ * land there via the session RealtimeProvider, so this component owns no
+ * subscription and no mirror state (§8). Local state holds only the
+ * optimistic in-flight message; failures roll it back (§24).
  *
  * Messages live inside a fixed-height scroll region so a long thread
  * never pushes the page around, and the composer stays pinned below it.
@@ -37,7 +43,15 @@ export function TaskComments({
   onAttachmentAdded,
   heightClassName = "h-80",
 }: TaskCommentsProps) {
-  const [comments, setComments] = useState<Comment[]>(initialComments);
+  const queryClient = useQueryClient();
+
+  // Observes the same cache entry the page rendered from — no extra
+  // fetch, and realtime comments appear here instantly.
+  const taskQuery = useQuery(taskDetailOptions(taskId));
+  const serverComments = taskQuery.data?.comments ?? initialComments;
+
+  // Optimistic in-flight messages only.
+  const [pending, setPending] = useState<Comment[]>([]);
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -45,92 +59,18 @@ export function TaskComments({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Keep a ref to the latest comments so realtime handlers can read
-  // the current list without being re-subscribed on every change.
-  const commentsRef = useRef<Comment[]>(comments);
-  useEffect(() => {
-    commentsRef.current = comments;
-  }, [comments]);
-
-  // Reset when task changes (navigating task A → B → A must not
-  // duplicate subscriptions or keep stale messages)
-  useEffect(() => {
-    setComments(initialComments);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId]);
-
-  // Realtime: new comments on this task only
-  useEffect(() => {
-    const supabase = createClient();
-
-    async function fetchAuthorAndAppend(row: {
-      id: string;
-      task_id: string;
-      user_id: string;
-      comment: string;
-      created_at: string;
-    }) {
-      if (commentsRef.current.some((c) => c.id === row.id)) return;
-
-      let author: { id: string; full_name: string; avatar_url: string | null } | null =
-        null;
-      try {
-        const { data } = await supabase
-          .from("profiles")
-          .select("id, full_name, avatar_url")
-          .eq("id", row.user_id)
-          .single();
-        author = data ?? null;
-      } catch {
-        author = null;
-      }
-
-      setComments((prev) => {
-        if (prev.some((c) => c.id === row.id)) return prev;
-        return [
-          ...prev,
-          {
-            ...row,
-            user:
-              author ?? {
-                id: row.user_id,
-                full_name: "Unknown",
-                avatar_url: null,
-              },
-          },
-        ];
-      });
-    }
-
-    const channel = supabase
-      .channel(`task-comments:${taskId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "task_comments",
-          filter: `task_id=eq.${taskId}`,
-        },
-        (payload) => {
-          const row = payload.new as {
-            id: string;
-            task_id: string;
-            user_id: string;
-            comment: string;
-            created_at: string;
-          };
-          void fetchAuthorAndAppend(row);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [taskId]);
+  // Dedupe by id — realtime + optimistic updates can deliver the same
+  // row twice (same protection the server query applies).
+  const seen = new Set<string>();
+  const comments: Comment[] = [];
+  for (const c of [...serverComments, ...pending]) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    comments.push(c);
+  }
 
   // Scroll to newest message inside the scroll container only.
+  // (DOM-only effect: no React state is written here.)
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -153,22 +93,30 @@ export function TaskComments({
       created_at: new Date().toISOString(),
       user: { id: currentUserId, full_name: "You", avatar_url: null },
     };
-    setComments((prev) => [...prev, optimistic]);
+    setPending((prev) => [...prev, optimistic]);
     setValue("");
 
     const result = await addCommentAction(taskId, text);
 
     if (result.success && result.data) {
-      setComments((prev) => {
-        const realId = result.data!.id;
-        const withoutOptimistic = prev.filter((c) => c.id !== optimisticId);
-        if (withoutOptimistic.some((c) => c.id === realId)) {
-          return withoutOptimistic;
-        }
-        return [...withoutOptimistic, result.data!];
-      });
+      const real = result.data;
+      setPending((prev) => prev.filter((c) => c.id !== optimisticId));
+      // Mirror into the shared cache (dedupe against the realtime copy).
+      queryClient.setQueryData<TaskDetail>(qk.taskDetail(taskId), (prev) =>
+        prev
+          ? {
+              ...prev,
+              comments: [...prev.comments.filter((c) => c.id !== real.id), real].sort(
+                (a, b) =>
+                  new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+              ),
+              comments_count: prev.comments_count + 1,
+            }
+          : prev
+      );
     } else {
-      setComments((prev) => prev.filter((c) => c.id !== optimisticId));
+      // Roll back the optimistic message — never fake success (§24).
+      setPending((prev) => prev.filter((c) => c.id !== optimisticId));
       setValue(text);
       toast.error(result.error ?? "Couldn't send your message");
     }

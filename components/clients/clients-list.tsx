@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, ArchiveRestore, Building2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -16,11 +17,12 @@ import {
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { EmptyState } from "@/components/shared/empty-state";
 import {
-  getClients,
   archiveClientAction,
   restoreClientAction,
   deleteClientAction,
 } from "@/lib/actions/clients";
+import { clientsListOptions } from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
 
 interface ClientRow {
   id: string;
@@ -34,47 +36,22 @@ interface ClientRow {
 type ClientsTab = "active" | "archived";
 
 export function ClientsList() {
-  const [clients, setClients] = useState<ClientRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<ClientsTab>("active");
   const [confirmDelete, setConfirmDelete] = useState<ClientRow | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const load = useCallback(async (archived: boolean) => {
-    setLoading(true);
-    const result = await getClients({ archived });
-    if (result.success && result.data) {
-      setClients(
-        result.data.map((c) => ({
-          id: c.id,
-          name: c.name,
-          company_name: c.company_name,
-          email: c.email,
-          active: c.active,
-          projects_count: c.projects_count,
-        }))
-      );
-    } else {
-      setClients([]);
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.resolve().then(() => {
-      if (!cancelled) void load(tab === "archived");
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [tab, load]);
+  // Cached per tab; revisiting or switching tabs serves cache (§3).
+  const activeQuery = useQuery(clientsListOptions(false));
+  const archivedQuery = useQuery(clientsListOptions(true));
+  const clients = (tab === "active" ? activeQuery.data : archivedQuery.data) ?? [];
+  const loading = tab === "active" ? activeQuery.isLoading : archivedQuery.isLoading;
 
   async function handleArchive(id: string) {
     const result = await archiveClientAction(id);
     if (result.success) {
       toast.success("Client archived");
-      void load(false);
+      await queryClient.invalidateQueries({ queryKey: ["clients", "list"], refetchType: "active" });
     } else {
       toast.error(result.error ?? "Couldn't archive the client");
     }
@@ -84,7 +61,7 @@ export function ClientsList() {
     const result = await restoreClientAction(id);
     if (result.success) {
       toast.success("Client restored");
-      void load(true);
+      await queryClient.invalidateQueries({ queryKey: ["clients", "list"], refetchType: "active" });
     } else {
       toast.error(result.error ?? "Couldn't restore the client");
     }
@@ -98,7 +75,10 @@ export function ClientsList() {
     if (result.success) {
       toast.success("Client deleted permanently");
       setConfirmDelete(null);
-      void load(true);
+      queryClient.setQueryData<ClientRow[]>(qk.clientsList(true), (prev) =>
+        prev ? prev.filter((c) => c.id !== confirmDelete.id) : prev
+      );
+      queryClient.removeQueries({ queryKey: qk.clientDetail(confirmDelete.id) });
     } else {
       toast.error(result.error ?? "Couldn't delete the client");
     }

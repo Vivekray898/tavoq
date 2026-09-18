@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   List,
   KanbanSquare,
@@ -36,20 +37,18 @@ import { TableView } from "@/components/tasks/table-view";
 import { QuickAddTask } from "@/components/tasks/quick-add-task";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { EmptyState } from "@/components/shared/empty-state";
-import { getTasks } from "@/lib/actions/tasks";
-import { getActiveEmployees } from "@/lib/actions/employees";
-import {
-  getLabels,
-  getSavedFilters,
-  saveFilter,
-  deleteSavedFilter,
-  type SavedFilterRow,
-} from "@/lib/actions/task-extras";
+import { deleteSavedFilter, type SavedFilterRow } from "@/lib/actions/task-extras";
 import { TASK_STATUSES, TASK_STATUS_LABELS, PRIORITY_LABELS } from "@/lib/constants";
-import { createClient } from "@/lib/supabase/client";
+import {
+  taskListOptions,
+  activeEmployeesOptions,
+  labelsOptions,
+  savedFiltersOptions,
+} from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
+import { useSession } from "@/components/providers/session-provider";
 import { cn } from "@/lib/utils";
-import type { TaskListItem } from "@/lib/actions/tasks";
-import type { Label, TaskView, UserRole } from "@/types/database";
+import type { TaskView } from "@/types/database";
 
 interface Filters {
   status: string;
@@ -78,68 +77,26 @@ const BUILT_IN_VIEWS: Array<{ name: string; filters: Partial<Filters> }> = [
 ];
 
 export default function TasksPage() {
-  const [tasks, setTasks] = useState<TaskListItem[]>([]);
-  const [labels, setLabels] = useState<Label[]>([]);
-  const [savedViews, setSavedViews] = useState<SavedFilterRow[]>([]);
-  const [employees, setEmployees] = useState<Array<{ id: string; full_name: string }>>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const { userId: currentUserId, role: userRole } = useSession();
+
+  // Cached queries — revisiting this page reads from cache, it does not
+  // refetch while data is fresh (§3). Realtime keeps it live (§5).
+  const tasksQuery = useQuery(taskListOptions);
+  const employeesQuery = useQuery(activeEmployeesOptions);
+  const labelsQuery = useQuery(labelsOptions);
+  const savedViewsQuery = useQuery(savedFiltersOptions);
+
+  const tasks = useMemo(() => tasksQuery.data ?? [], [tasksQuery.data]);
+  const employees = employeesQuery.data ?? [];
+  const labels = labelsQuery.data ?? [];
+  const savedViews = savedViewsQuery.data ?? [];
+  const loading = tasksQuery.isLoading;
+
   const [view, setView] = useState<TaskView>("list");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [currentUserId, setCurrentUserId] = useState("");
-  const [userRole, setUserRole] = useState<UserRole>("EMPLOYEE");
-
-  const load = useCallback(async () => {
-    const [tasksRes, empsRes] = await Promise.all([
-      getTasks(),
-      getActiveEmployees(),
-    ]);
-    if (tasksRes.success && tasksRes.data) setTasks(tasksRes.data);
-    if (empsRes.success && empsRes.data) setEmployees(empsRes.data);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user) {
-        setCurrentUserId(user.id);
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("id", user.id)
-          .single();
-        if (profile) setUserRole(profile.role);
-      }
-      void load();
-      void (async () => {
-        const [labelsRes, viewsRes] = await Promise.all([getLabels(), getSavedFilters()]);
-        if (labelsRes.success && labelsRes.data) setLabels(labelsRes.data);
-        if (viewsRes.success && viewsRes.data) setSavedViews(viewsRes.data);
-      })();
-    })();
-  }, [load]);
-
-  // Realtime: refresh list when tasks change (§16)
-  useEffect(() => {
-    const supabase = createClient();
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const channel = supabase
-      .channel("tasks-page")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(load, 500);
-      })
-      .subscribe();
-    return () => {
-      if (timer) clearTimeout(timer);
-      supabase.removeChannel(channel);
-    };
-  }, [load]);
 
   // Snapshot "now" once per task-load so filtering stays pure per render
   const [nowStamp, setNowStamp] = useState(() => Date.now());
@@ -204,6 +161,7 @@ export default function TasksPage() {
   async function handleSaveView() {
     const name = window.prompt("Name this view:");
     if (!name?.trim()) return;
+    const { saveFilter } = await import("@/lib/actions/task-extras");
     const result = await saveFilter(name.trim(), {
       ...(filters.status ? { status: filters.status } : {}),
       ...(filters.priority ? { priority: filters.priority } : {}),
@@ -211,7 +169,10 @@ export default function TasksPage() {
       ...(filters.label_id ? { label_id: filters.label_id } : {}),
     });
     if (result.success && result.data) {
-      setSavedViews((prev) => [...prev, result.data!]);
+      queryClient.setQueryData<SavedFilterRow[]>(qk.savedFilters(), (prev) => [
+        ...(prev ?? []),
+        result.data!,
+      ]);
       toast.success("View saved");
     } else {
       toast.error(result.error ?? "Couldn't save view");
@@ -221,7 +182,9 @@ export default function TasksPage() {
   async function handleDeleteView(id: string) {
     const result = await deleteSavedFilter(id);
     if (result.success) {
-      setSavedViews((prev) => prev.filter((v) => v.id !== id));
+      queryClient.setQueryData<SavedFilterRow[]>(qk.savedFilters(), (prev) =>
+        (prev ?? []).filter((v) => v.id !== id)
+      );
     } else {
       toast.error(result.error ?? "Couldn't delete view");
     }
@@ -401,7 +364,10 @@ export default function TasksPage() {
       {/* Quick add (list view only) */}
       {view === "list" && userRole === "ADMIN" && !loading && (
         <QuickAddTask
-          onCreated={(t) => setTasks((prev) => [t, ...prev])}
+          onCreated={() => {
+            // Targeted: the created task lands via one list refetch.
+            void queryClient.invalidateQueries({ queryKey: qk.tasks() });
+          }}
         />
       )}
 
@@ -423,7 +389,6 @@ export default function TasksPage() {
           tasks={filtered}
           currentUserId={currentUserId}
           isAdmin={userRole === "ADMIN"}
-          onChanged={load}
         />
       ) : view === "calendar" ? (
         <CalendarView tasks={filtered} />

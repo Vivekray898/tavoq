@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
   Clock,
@@ -13,12 +13,8 @@ import {
 import { Button, buttonVariants } from "@/components/ui/button";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { StatusDot } from "@/components/shared/status-dot";
-import { createClient } from "@/lib/supabase/client";
-import {
-  getAdminDashboard,
-  type AdminDashboardData,
-} from "@/lib/actions/dashboard";
-import { getRecentActivity, type ActivityItem } from "@/lib/actions/activity";
+import { adminDashboardOptions } from "@/lib/queries/options";
+import { getRecentActivity } from "@/lib/actions/activity";
 import { formatActivityText } from "@/lib/activity-format";
 import {
   getGreeting,
@@ -26,59 +22,31 @@ import {
   isOverdue,
   cn,
 } from "@/lib/utils";
+import type { ActivityItem } from "@/lib/actions/activity";
 
 interface AdminDashboardProps {
   firstName: string;
 }
 
+/**
+ * §9 — cached dashboard. One query key; task/comment/payment events
+ * invalidate it via the session RealtimeProvider only while it's
+ * mounted. Navigating away and back serves cache, not a refetch.
+ */
 export function AdminDashboard({ firstName: _firstName }: AdminDashboardProps) {
-  const [data, setData] = useState<AdminDashboardData | null>(null);
-  const [activity, setActivity] = useState<ActivityItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const fetchingRef = useRef(false);
+  const { data, isLoading } = useQuery(adminDashboardOptions);
+  const activityQuery = useQuery({
+    queryKey: ["activity", "recent", 8] as const,
+    queryFn: async () => {
+      const res = await getRecentActivity(8);
+      if (!res.success || !res.data) throw new Error(res.error ?? "Failed to load activity");
+      return res.data as ActivityItem[];
+    },
+    staleTime: 30_000,
+  });
+  const activity = activityQuery.data ?? [];
 
-  const refresh = useCallback(async () => {
-    if (fetchingRef.current) return;
-    fetchingRef.current = true;
-    try {
-      const [result, activityRes] = await Promise.all([
-        getAdminDashboard(),
-        getRecentActivity(8),
-      ]);
-      if (result.success && result.data) setData(result.data);
-      if (activityRes.success && activityRes.data) setActivity(activityRes.data);
-    } finally {
-      fetchingRef.current = false;
-    }
-  }, []);
-
-  useEffect(() => {
-    refresh().finally(() => setLoading(false));
-  }, [refresh]);
-
-  // Realtime: refresh when tasks/comments/payments change (debounced)
-  useEffect(() => {
-    const supabase = createClient();
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const schedule = () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(refresh, 500);
-    };
-
-    const channel = supabase
-      .channel("admin-dashboard")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, schedule)
-      .on("postgres_changes", { event: "*", schema: "public", table: "task_comments" }, schedule)
-      .on("postgres_changes", { event: "*", schema: "public", table: "payments" }, schedule)
-      .subscribe();
-
-    return () => {
-      if (timer) clearTimeout(timer);
-      supabase.removeChannel(channel);
-    };
-  }, [refresh]);
-
-  if (loading || !data) {
+  if (isLoading || !data) {
     return (
       <div className="space-y-6">
         <SkeletonList rows={4} />

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Archive,
@@ -24,31 +25,20 @@ import {
 } from "@/components/ui/dialog";
 import { SkeletonPage } from "@/components/shared/skeleton-loader";
 import { EmptyState } from "@/components/shared/empty-state";
-import { getClient, archiveClientAction } from "@/lib/actions/clients";
+import { archiveClientAction } from "@/lib/actions/clients";
+import { clientDetailOptions } from "@/lib/queries/options";
+import { qk } from "@/lib/queries/keys";
 import { cn } from "@/lib/utils";
-import type { ClientDetail } from "@/lib/actions/clients";
 
 export default function ClientDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const clientId = params.id as string;
-  const [client, setClient] = useState<ClientDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+
+  const { data: client, isLoading: loading, error } = useQuery(clientDetailOptions(clientId));
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiving, setArchiving] = useState(false);
-
-  useEffect(() => {
-    (async () => {
-      const result = await getClient(clientId);
-      if (result.success && result.data) {
-        setClient(result.data);
-      } else {
-        setError(result.error ?? "Client not found");
-      }
-      setLoading(false);
-    })();
-  }, [clientId]);
 
   async function handleArchive() {
     setArchiving(true);
@@ -56,6 +46,8 @@ export default function ClientDetailPage() {
     setArchiving(false);
     if (result.success) {
       toast.success("Client archived");
+      // Targeted: drop the detail, refresh client lists when next shown.
+      queryClient.removeQueries({ queryKey: qk.clientDetail(clientId) });
       router.push("/clients");
     } else {
       toast.error(result.error ?? "Couldn't archive client");

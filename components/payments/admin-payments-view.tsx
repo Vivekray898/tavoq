@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCheck,
   CheckCircle2,
@@ -22,12 +23,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
-import { createClient } from "@/lib/supabase/client";
 import {
-  getAdminPayments,
   markPaymentsPaidBatch,
   type AdminPaymentsData,
 } from "@/lib/actions/payments";
+import { adminPaymentsOptions } from "@/lib/queries/options";
 import { formatCurrency, formatDate, getRelativeTime, cn } from "@/lib/utils";
 
 type PaymentsTab = "pending" | "paid" | "employees";
@@ -44,11 +44,14 @@ interface EmployeeSummary {
 }
 
 /**
- * §30–37 — lightweight payout management workspace.
+ * §30–37 — lightweight payout management workspace. Cached via
+ * ['payments','admin']; realtime payment events invalidate it only
+ * while this view is mounted.
  */
 export function AdminPaymentsView() {
-  const [data, setData] = useState<AdminPaymentsData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const { data, isLoading } = useQuery(adminPaymentsOptions);
+
   const [tab, setTab] = useState<PaymentsTab>("pending");
   const [employeeFilter, setEmployeeFilter] = useState<string>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -56,43 +59,6 @@ export function AdminPaymentsView() {
   const [note, setNote] = useState("");
   const [marking, setMarking] = useState(false);
   const [drilldown, setDrilldown] = useState<EmployeeSummary | null>(null);
-
-  const load = useCallback(async () => {
-    const result = await getAdminPayments();
-    if (result.success && result.data) setData(result.data);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.resolve().then(() => {
-      if (!cancelled) void load();
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [load]);
-
-  // Realtime: payments change → refresh (§26)
-  useEffect(() => {
-    const supabase = createClient();
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const channel = supabase
-      .channel("admin-payments")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "payments" },
-        () => {
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(load, 400);
-        }
-      )
-      .subscribe();
-    return () => {
-      if (timer) clearTimeout(timer);
-      supabase.removeChannel(channel);
-    };
-  }, [load]);
 
   // Per-employee rollup
   const employees = useMemo<EmployeeSummary[]>(() => {
@@ -193,13 +159,16 @@ export function AdminPaymentsView() {
       setSelected(new Set());
       setConfirmOpen(false);
       setNote("");
-      void load();
+      // The payment rows + task payment_status rows changed server-side;
+      // realtime also fires, but refresh the mounted view immediately so
+      // the summary is exact (other caches stay untouched).
+      await queryClient.invalidateQueries({ queryKey: ["payments"], refetchType: "active" });
     } else {
       toast.error(result.error ?? "Couldn't mark the payments as paid");
     }
   }
 
-  if (loading && !data) {
+  if (isLoading && !data) {
     return (
       <div className="space-y-6">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

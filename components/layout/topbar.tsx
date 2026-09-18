@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { LogOut, Search, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { buttonVariants } from "@/components/ui/button";
@@ -24,6 +25,7 @@ interface TopbarProps {
 
 export function Topbar({ profile }: TopbarProps) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -31,6 +33,8 @@ export function Topbar({ profile }: TopbarProps) {
     setIsSigningOut(true);
     const supabase = createClient();
     await supabase.auth.signOut();
+    // Clear every user-specific cache entry + unsubscribe realtime (§19).
+    queryClient.clear();
     router.push("/login");
     router.refresh();
   }
