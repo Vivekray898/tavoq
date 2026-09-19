@@ -26,6 +26,7 @@ export interface PaymentItem {
   task_id: string | null;
   label: string; // task title or custom description
   project_name: string | null;
+  client_name: string | null;
   amount: number;
   status: "PENDING" | "PAID";
   paid_at: string | null;
@@ -106,7 +107,7 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
         .select(
           `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
            employee:profiles!payments_employee_id_fkey(full_name),
-           task:tasks(id, title, project:projects(name))`
+           task:tasks(id, title, project:projects(name, client:clients(name)))`
         )
         .order("created_at", { ascending: false })
         .limit(500),
@@ -134,7 +135,10 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
       task: {
         id: string;
         title: string;
-        project: { name: string }[] | { name: string } | null;
+        project:
+          | { name: string; client: { name: string }[] | { name: string } | null }[]
+          | { name: string; client: { name: string }[] | { name: string } | null }
+          | null;
       } | null;
     };
 
@@ -144,6 +148,12 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
       const row = raw as PaymentRow;
       const task = row.task;
       const project = task ? one(task.project) : null;
+      const client = project
+        ? one(
+            (project as { client?: { name: string }[] | { name: string } | null }).client ??
+              null
+          )
+        : null;
       const employee = one(row.employee);
       return {
         id: row.id,
@@ -153,6 +163,7 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
         task_id: row.task_id,
         label: row.task_id ? (task?.title ?? "Task") : (row.description ?? "Custom payment"),
         project_name: project?.name ?? null,
+        client_name: client?.name ?? null,
         amount: Number(row.amount),
         status: row.paid_at ? "PAID" : "PENDING",
         paid_at: row.paid_at,
@@ -502,6 +513,7 @@ export async function createCustomPayment(
         task_id: null,
         label: description.trim(),
         project_name: null,
+        client_name: null,
         amount,
         status: markPaidNow ? "PAID" : "PENDING",
         paid_at: markPaidNow ? new Date().toISOString() : null,
@@ -583,6 +595,7 @@ export async function markPaymentPaid(
         task_id: paidRow.task_id,
         label: paidRow.task_id ? (paidRow.task?.title ?? "Task") : (paidRow.description ?? "Custom payment"),
         project_name: null,
+        client_name: null,
         amount: Number(paidRow.amount),
         status: "PAID",
         paid_at: paidAt,

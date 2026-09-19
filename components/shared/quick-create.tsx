@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { CheckSquare, FolderKanban, Building2, IndianRupee, Plus } from "lucide-react";
 import {
   DropdownMenu,
@@ -30,7 +30,7 @@ export function QuickCreate() {
     { label: "Task", icon: CheckSquare, href: "/tasks/new" },
     { label: "Project", icon: FolderKanban, href: "/projects/new" },
     { label: "Client", icon: Building2, href: "/clients/new" },
-    { label: "Payment", icon: IndianRupee, href: "/payments", payment: true },
+    { label: "Payment", icon: IndianRupee, href: "/payments" },
   ];
 
   return (
@@ -48,15 +48,9 @@ export function QuickCreate() {
             key={item.label}
             onClick={() => {
               setOpen(false);
-              if (item.payment) {
-                // Dedicated payments workflow — the workspace owns creation.
-                router.push(item.href);
-                window.dispatchEvent(
-                  new CustomEvent("taskora-payments-intent", { detail: "create" })
-                );
-              } else {
-                router.push(item.href);
-              }
+              // Payment routes to the dedicated Payments workflow;
+              // everything else to its existing create page.
+              router.push(item.href);
             }}
           >
             <item.icon className="mr-1 size-4 text-muted-foreground" />
@@ -68,11 +62,22 @@ export function QuickCreate() {
   );
 }
 
-/** Mobile FAB variant — fixed above the bottom nav on small screens. */
+/**
+ * Mobile FAB — fixed above the bottom nav on small screens.
+ * Hidden on detail pages where a sticky action bar already occupies
+ * the same corner (§19 — no sticky-element collisions).
+ */
 export function MobileQuickCreate() {
   const { role } = useSession();
+  const pathname = usePathname();
   const isAdmin = role === "ADMIN";
   if (!isAdmin) return null;
+
+  // Task detail / project detail render their own sticky bottom bars.
+  const onDetailPage =
+    /^\/tasks\/[^/]+/.test(pathname) ||
+    /^\/projects\/[^/]+/.test(pathname);
+  if (onDetailPage) return null;
 
   return (
     <Link

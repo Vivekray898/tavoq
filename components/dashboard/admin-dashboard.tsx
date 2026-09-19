@@ -219,21 +219,30 @@ export function AdminDashboard({ firstName: _firstName }: AdminDashboardProps) {
           </p>
         ) : (
           <div className="divide-y rounded-xl border bg-card">
-            {activity.map((item) => (
-              <div key={item.id} className="flex items-start gap-3 px-4 py-3">
-                <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                  <MessageSquare className="size-3.5" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium">
-                    {formatActivityText(item.actor_name, item.type, item.detail, item.task_title)}
-                  </p>
-                  <p className="mt-0.5 text-[13px] text-muted-foreground">
-                    {getRelativeTime(item.created_at)}
-                  </p>
-                </div>
-              </div>
-            ))}
+            {activity.map((item) => {
+              const Wrapper: React.ElementType = item.task_id
+                ? Link
+                : "div";
+              return (
+                <Wrapper
+                  key={item.id}
+                  {...(item.task_id ? { href: `/tasks/${item.task_id}` } : {})}
+                  className="flex items-start gap-3 px-4 py-3 transition-colors hover:bg-accent/50"
+                >
+                  <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                    <MessageSquare className="size-3.5" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {formatActivityText(item.actor_name, item.type, item.detail, item.task_title)}
+                    </p>
+                    <p className="mt-0.5 text-[13px] text-muted-foreground">
+                      {getRelativeTime(item.created_at)}
+                    </p>
+                  </div>
+                </Wrapper>
+              );
+            })}
           </div>
         )}
       </section>

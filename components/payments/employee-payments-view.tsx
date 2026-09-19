@@ -155,6 +155,7 @@ export function EmployeePaymentsView() {
                         employee_id: null,
                         employee_name: null,
                         task_id: null,
+                        client_name: null,
                         label: item.label,
                         project_name: item.project_name,
                         amount: item.amount,
