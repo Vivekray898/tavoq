@@ -9,6 +9,7 @@ import { Loader2, LogOut, Mail } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { GoogleCalendarConnect } from "@/components/settings/google-calendar-connect";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Field, FieldLabel, FieldError, FieldGroup } from "@/components/ui/field";
 import { Switch } from "@/components/ui/switch";
@@ -182,6 +183,9 @@ export default function ProfilePage() {
           ))}
         </div>
       </section>
+
+      {/* Google Calendar */}
+      <GoogleCalendarConnect />
 
       {/* Sign out */}
       <Button

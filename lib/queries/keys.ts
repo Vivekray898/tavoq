@@ -46,6 +46,9 @@ export const qk = {
   payableTasks: (employeeId: string) => ["payments", "payable", employeeId] as const,
 
   labels: () => ["labels"] as const,
+
+  /** Per-user Google Calendar connection + sync state. */
+  googleCalendar: () => ["google-calendar", "status"] as const,
   savedFilters: () => ["saved-filters"] as const,
 
   /** ACTIVE projects (+client names) for task create/edit dropdowns. */

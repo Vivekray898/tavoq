@@ -1,9 +1,21 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "Taskora <noreply@taskora.app>";
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+
+let client: Resend | null = null;
+
+/**
+ * Built lazily: the Resend constructor throws when the API key is
+ * missing, and email is optional (see README). Constructing it at
+ * module scope broke any route that imports this file when
+ * RESEND_API_KEY wasn't configured.
+ */
+function getResend(): Resend | null {
+  if (!process.env.RESEND_API_KEY) return null;
+  client ??= new Resend(process.env.RESEND_API_KEY);
+  return client;
+}
 
 interface SendEmailOptions {
   to: string;
@@ -12,7 +24,8 @@ interface SendEmailOptions {
 }
 
 async function sendEmail({ to, subject, html }: SendEmailOptions) {
-  if (!process.env.RESEND_API_KEY) {
+  const resend = getResend();
+  if (!resend) {
     console.warn("RESEND_API_KEY not configured. Skipping email.");
     return null;
   }

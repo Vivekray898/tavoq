@@ -25,6 +25,10 @@ import {
   type EmployeeProfileDetail,
 } from "@/lib/actions/employees";
 import {
+  getGoogleCalendarStatus,
+  type GoogleConnectionStatus,
+} from "@/lib/actions/google-calendar";
+import {
   getMyEarnings,
   getPaymentWorkspace,
   getEmployeePayableTasks,
@@ -149,6 +153,19 @@ export const activeEmployeesOptions = queryOptions<
     return res.data;
   },
   staleTime: 120_000,
+});
+
+/** Whether the signed-in user has connected Google Calendar. */
+export const googleCalendarOptions = queryOptions<GoogleConnectionStatus>({
+  queryKey: qk.googleCalendar(),
+  queryFn: async () => {
+    const res = await getGoogleCalendarStatus();
+    if (!res.success || !res.data) {
+      throw new Error(res.error ?? "Failed to load the Google Calendar status");
+    }
+    return res.data;
+  },
+  staleTime: 60_000,
 });
 
 export const notificationsOptions = queryOptions<Notification[]>({
