@@ -9,7 +9,9 @@ export default async function EmployeeProfilePage({
 }) {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "SUPER_ADMIN") redirect("/tasks");
+  // Staff-only surface: super admin or manager. Managers are
+  // additionally scoped to their own projects inside the actions.
+  if (profile.role !== "SUPER_ADMIN" && profile.role !== "MANAGER") redirect("/tasks");
 
   const { id } = await params;
   return <EmployeeProfile employeeId={id} />;

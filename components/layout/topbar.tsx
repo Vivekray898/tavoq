@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { getInitials, cn } from "@/lib/utils";
+import { ROLE_LABELS } from "@/lib/permissions";
 import type { Profile } from "@/types/database";
 
 interface TopbarProps {
@@ -84,6 +85,17 @@ export function Topbar({ profile }: TopbarProps) {
         </DropdownMenuTrigger>
 
         <DropdownMenuContent align="end" className="w-44">
+          {/* Role badge — cosmetic, but makes it obvious at a glance
+              which tier of the three-role model is signed in. */}
+          <div className="flex items-center justify-between gap-2 px-2 py-1.5">
+            <span className="truncate text-xs text-muted-foreground">
+              {profile.full_name}
+            </span>
+            <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              {profile.role ? ROLE_LABELS[profile.role] : null}
+            </span>
+          </div>
+          <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => router.push("/profile")}>
             <User className="size-4" />
             Profile

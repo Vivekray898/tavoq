@@ -5,7 +5,9 @@ import { ClientsList } from "@/components/clients/clients-list";
 export default async function ClientsPage() {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "SUPER_ADMIN") redirect("/projects");
+  // Staff-only surface: super admin or manager. Managers are
+  // additionally scoped to their own projects inside the actions.
+  if (profile.role !== "SUPER_ADMIN" && profile.role !== "MANAGER") redirect("/projects");
 
   return <ClientsList />;
 }

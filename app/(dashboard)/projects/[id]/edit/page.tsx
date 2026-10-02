@@ -12,7 +12,9 @@ export default async function EditProjectPage({
 }) {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "SUPER_ADMIN") redirect("/projects");
+  // Staff may open these; the action behind the form enforces
+  // project scoping for managers (assertCanManageProject).
+  if (profile.role !== "SUPER_ADMIN" && profile.role !== "MANAGER") redirect("/projects");
 
   const { id } = await params;
   const result = await getProject(id);

@@ -71,7 +71,11 @@ export async function addCommentAction(
       const { data: admins } = await admin
         .from("profiles")
         .select("id")
-        .eq("role", "ADMIN")
+        // Staff, not the retired ADMIN role: a manager must also be
+        // told a task is ready for review. Phase 1 replaced the
+        // ADMIN enum value with SUPER_ADMIN and added MANAGER, and
+        // this filter was left behind — it would throw at runtime.
+        .in("role", ["SUPER_ADMIN", "MANAGER"])
         .eq("status", "ACTIVE");
       (admins ?? []).forEach((a) => recipientIds.add(a.id));
     }

@@ -28,6 +28,13 @@ export interface NavSection {
 /**
  * §7 Desktop sidebar navigation — grouped, minimal.
  */
+/**
+ * §7 Desktop sidebar navigation — grouped, minimal.
+ *
+ * SUPER_ADMIN and MANAGER share one nav; the two entries they may not
+ * see (/settings, and the employee-only distinction) are filtered in
+ * getNavForRole below rather than duplicated here.
+ */
 export const ADMIN_NAV: NavSection[] = [
   { items: [{ label: "Overview", href: "/", icon: LayoutDashboard }] },
   {
@@ -101,20 +108,63 @@ export const ADMIN_MORE_ITEMS: NavItem[] = [
   { label: "Profile", href: "/profile", icon: User },
 ];
 
+/**
+ * Manager "More" items — identical to the super admin's minus
+ * /settings, which is super-admin only.
+ */
+export const MANAGER_MORE_ITEMS: NavItem[] = ADMIN_MORE_ITEMS.filter(
+  (item) => item.href !== "/settings"
+);
+
+/**
+ * Drop any item the given role must not see.
+ *
+ * Nav hiding is cosmetic: every destination also has a server-side
+ * guard on the page itself (requireSuperAdmin / requireStaff), so a
+ * user who types the URL directly is redirected rather than shown a
+ * blank page.
+ */
+function filterNav(sections: NavSection[], role: UserRole): NavSection[] {
+  const allowSettings = role === "SUPER_ADMIN";
+  return sections
+    .map((section) => ({
+      ...section,
+      items: section.items.filter(
+        (item) => allowSettings || item.href !== "/settings"
+      ),
+    }))
+    .filter((section) => section.items.length > 0);
+}
+
 /** Employee "More" fallback (only used if notifications not shown) */
 export const EMPLOYEE_MORE_ITEMS: NavItem[] = [
   { label: "Profile", href: "/profile", icon: User },
 ];
 
+/**
+ * Navigation for a role.
+ *
+ *   SUPER_ADMIN → full admin nav, including /settings
+ *   MANAGER     → same nav minus /settings
+ *   EMPLOYEE    → the personal nav (own tasks, own payments)
+ *
+ * Phase 1 deliberately gave managers the employee nav, because the
+ * server-side guards already allowed them everywhere and the UI simply
+ * hadn't caught up. This is that catch-up.
+ */
 export function getNavForRole(role: UserRole) {
+  if (role === "SUPER_ADMIN" || role === "MANAGER") {
+    return {
+      desktop: filterNav(ADMIN_NAV, role),
+      mobile: ADMIN_MOBILE_NAV,
+      more: role === "SUPER_ADMIN" ? ADMIN_MORE_ITEMS : MANAGER_MORE_ITEMS,
+    };
+  }
+
   return {
-    // Phase 1 keeps navigation exactly as it was: super admin sees the
-    // admin nav, everyone else sees the employee nav. Manager entries
-    // are added in the UI phase — RLS and the actions already scope a
-    // manager correctly, so nothing here is a security boundary.
-    desktop: role === "SUPER_ADMIN" ? ADMIN_NAV : EMPLOYEE_NAV,
-    mobile: role === "SUPER_ADMIN" ? ADMIN_MOBILE_NAV : EMPLOYEE_MOBILE_NAV,
-    more: role === "SUPER_ADMIN" ? ADMIN_MORE_ITEMS : EMPLOYEE_MORE_ITEMS,
+    desktop: EMPLOYEE_NAV,
+    mobile: EMPLOYEE_MOBILE_NAV,
+    more: EMPLOYEE_MORE_ITEMS,
   };
 }
 

@@ -6,7 +6,9 @@ import { ClientForm } from "@/components/clients/client-form";
 export default async function NewClientPage() {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "SUPER_ADMIN") redirect("/projects");
+  // Staff-only surface: super admin or manager. Managers are
+  // additionally scoped to their own projects inside the actions.
+  if (profile.role !== "SUPER_ADMIN" && profile.role !== "MANAGER") redirect("/projects");
 
   return (
     <div className="space-y-6">

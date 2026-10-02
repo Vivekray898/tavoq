@@ -374,6 +374,14 @@ export function AdminPaymentsView() {
   }
 
   async function handleMarkPaid(payment: PaymentItem) {
+    // Optimistic (§38): flip the row now, restore it if the server
+    // rejects, then reconcile with the authoritative paid_at.
+    const snapshot = queryClient.getQueryData<PaymentWorkspaceData>(
+      qk.paymentWorkspace()
+    );
+    const optimisticAt = new Date().toISOString();
+    patchHistoryRow(payment.id, { status: "PAID", paid_at: optimisticAt });
+
     const result = await markPaymentPaid(payment.id);
     if (result.success && result.data) {
       patchHistoryRow(payment.id, { status: "PAID", paid_at: result.data.paid_at });
@@ -385,6 +393,7 @@ export function AdminPaymentsView() {
       });
       if (detailId === payment.id) setDetailId(null);
     } else {
+      queryClient.setQueryData(qk.paymentWorkspace(), snapshot);
       toast.error(result.error ?? "Couldn't mark the payment as paid");
     }
   }
@@ -392,8 +401,33 @@ export function AdminPaymentsView() {
   async function runBulkMarkPaid() {
     if (bulkIds.size === 0) return;
     setBulkWorking(true);
-    const result = await markPaymentsPaidBatch(Array.from(bulkIds));
+
+    // ── Optimistic (§38) ──
+    // Flip the rows to PAID immediately, snapshot the cache, and roll
+    // back if the server refuses. The alternative — waiting for the
+    // round-trip — makes the sheet feel stuck on a slow connection.
+    const ids = Array.from(bulkIds);
+    const optimisticAt = new Date().toISOString();
+    const snapshot = queryClient.getQueryData<PaymentWorkspaceData>(
+      qk.paymentWorkspace()
+    );
+
+    queryClient.setQueryData<PaymentWorkspaceData>(qk.paymentWorkspace(), (prev) =>
+      prev
+        ? {
+            ...prev,
+            history: prev.history.map((p) =>
+              bulkIds.has(p.id)
+                ? { ...p, status: "PAID" as const, paid_at: optimisticAt }
+                : p
+            ),
+          }
+        : prev
+    );
+
+    const result = await markPaymentsPaidBatch(ids);
     setBulkWorking(false);
+
     if (result.success && result.data) {
       const paidAtById = new Map(result.data.items.map((i) => [i.id, i.paid_at]));
       queryClient.setQueryData<PaymentWorkspaceData>(qk.paymentWorkspace(), (prev) =>
@@ -416,6 +450,8 @@ export function AdminPaymentsView() {
       setBulkIds(new Set());
       setBulkConfirmOpen(false);
     } else {
+      // Roll back to exactly what was on screen before.
+      queryClient.setQueryData(qk.paymentWorkspace(), snapshot);
       toast.error(result.error ?? "Couldn't mark the payments as paid");
     }
   }

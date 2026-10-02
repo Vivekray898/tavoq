@@ -28,6 +28,7 @@ export function RealtimeProvider({
   useEffect(() => {
     const supabase = createClient();
     let everConnected = false;
+    const authUserId = userId;
 
     /** Merge raw task columns onto cached task objects, preserving embeds. */
     const patchCachedTask = (row: Record<string, unknown>) => {
@@ -180,6 +181,183 @@ export function RealtimeProvider({
       }, 400);
     };
 
+    /**
+     * §7 project_members — a manager added to (or removed from) a project
+     * must see the project list update without a refresh. This also covers
+     * their own membership changing mid-session.
+     */
+    const patchProjectMembers = (payload: {
+      eventType: "INSERT" | "UPDATE" | "DELETE";
+      new: Record<string, unknown> | undefined;
+      old: Record<string, unknown> | undefined;
+    }) => {
+      const row = payload.new ?? payload.old;
+      const userId = row?.user_id as string | undefined;
+      if (userId && userId !== authUserId) {
+        // Someone else's membership doesn't change what this user can see.
+        return;
+      }
+
+      // The projects list is server-scoped, and a membership row carries no
+      // project name, so the list is refetched — but ONLY while it is on
+      // screen (refetchType: "active"). An unmounted list costs nothing.
+      queryClient.invalidateQueries({
+        queryKey: ["projects"],
+        refetchType: "active",
+      });
+      // A new membership can add projects to the task-create picker.
+      queryClient.invalidateQueries({
+        queryKey: qk.projectsForTask(),
+        refetchType: "active",
+      });
+    };
+
+    /**
+     * §7 project_resources — the project detail screen embeds resources, and
+     * the resource rows are self-contained enough to patch in place.
+     */
+    const patchProjectResources = (payload: {
+      eventType: "INSERT" | "UPDATE" | "DELETE";
+      new: Record<string, unknown> | undefined;
+      old: Record<string, unknown> | undefined;
+    }) => {
+      const row = (payload.new ?? payload.old) as
+        | { id?: string; project_id?: string }
+        | undefined;
+      const projectId = row?.project_id as string | undefined;
+      if (!projectId) return;
+
+      // Resources are embedded on the project detail cache.
+      const detailKey = qk.projectDetail(projectId);
+      const cached = queryClient.getQueryData(detailKey) as
+        | { resources?: unknown[] }
+        | undefined;
+      if (!cached) return;
+
+      if (payload.eventType === "DELETE") {
+        const id = (payload.old as { id?: string })?.id;
+        if (!id) return;
+        queryClient.setQueryData(detailKey, (prev) =>
+          prev && Array.isArray((prev as { resources?: unknown[] }).resources)
+            ? {
+                ...prev,
+                resources: (prev as { resources: unknown[] }).resources.filter(
+                  (r) => (r as { id?: string }).id !== id
+                ),
+              }
+            : prev
+        );
+        return;
+      }
+
+      const id = (payload.new as { id?: string })?.id;
+      if (!id) return;
+      queryClient.setQueryData(detailKey, (prev) => {
+        if (!prev) return prev;
+        const resources = Array.isArray((prev as { resources?: unknown[] }).resources)
+          ? ([...(prev as { resources: unknown[] }).resources])
+          : [];
+        const at = resources.findIndex((r) => (r as { id?: string }).id === id);
+        if (at === -1) resources.push(payload.new);
+        else resources[at] = { ...(resources[at] as object), ...payload.new };
+        return { ...prev, resources };
+      });
+    };
+
+    /**
+     * §7 task_subtasks — subtasks live inside the task detail cache, so a
+     * change patches that document rather than triggering a refetch.
+     */
+    const patchSubtask = (payload: {
+      eventType: "INSERT" | "UPDATE" | "DELETE";
+      new: Record<string, unknown> | undefined;
+      old: Record<string, unknown> | undefined;
+    }) => {
+      const row = (payload.new ?? payload.old) as
+        | { id?: string; task_id?: string; done?: boolean }
+        | undefined;
+      const taskId = row?.task_id as string | undefined;
+      if (!taskId) return;
+
+      const detailKey = qk.taskDetail(taskId);
+      const cached = queryClient.getQueryData<TaskDetail>(detailKey);
+      if (!cached?.subtasks) return;
+
+      if (payload.eventType === "DELETE") {
+        const id = (payload.old as { id?: string })?.id;
+        if (!id) return;
+        queryClient.setQueryData<TaskDetail>(detailKey, (prev) => {
+          if (!prev?.subtasks) return prev;
+          const remaining = prev.subtasks.filter((s) => s.id !== id);
+          return {
+            ...prev,
+            subtasks: remaining,
+            subtasks_done: remaining.filter((s) => s.done).length,
+          };
+        });
+        return;
+      }
+
+      const id = (payload.new as { id?: string })?.id;
+      if (!id) return;
+      queryClient.setQueryData<TaskDetail>(detailKey, (prev) => {
+        if (!prev?.subtasks) return prev;
+        const at = prev.subtasks.findIndex((s) => s.id === id);
+        const next =
+          at === -1
+            ? [...prev.subtasks, payload.new as TaskDetail["subtasks"][number]]
+            : prev.subtasks.map((s, i) =>
+                i === at ? ({ ...s, ...payload.new } as typeof s) : s
+              );
+        return {
+          ...prev,
+          subtasks: next,
+          subtasks_done: next.filter((s) => s.done).length,
+        };
+      });
+    };
+
+    /**
+     * §7 activity — activity rows are self-contained (type, detail,
+     * created_at, actor), so they can be prepended into whichever
+     * activity caches are mounted. Counts are not aggregated here, so no
+     * dashboard invalidation is needed.
+     */
+    const patchActivity = (payload: {
+      eventType: "INSERT" | "UPDATE" | "DELETE";
+      new: Record<string, unknown> | undefined;
+      old: Record<string, unknown> | undefined;
+    }) => {
+      if (payload.eventType === "DELETE") return; // no visible effect
+
+      const row = payload.new as
+        | { id?: string; task_id?: string | null; project_id?: string | null }
+        | undefined;
+      if (!row?.id) return;
+
+      // setQueriesData's updater does not receive the query, so the
+      // scope filter is applied by walking the matched caches
+      // explicitly rather than guessing from a single list.
+      const caches = queryClient.getQueriesData<unknown[]>({
+        queryKey: ["activity"],
+      });
+      for (const [queryKey, list] of caches) {
+        if (!Array.isArray(list)) continue;
+        const scopeTaskId =
+          queryKey[1] === "task" ? (queryKey[2] as string) : null;
+        const scopeProjectId =
+          queryKey[1] === "project" ? (queryKey[2] as string) : null;
+
+        // Only feed an activity cache whose scope this row belongs to.
+        if (scopeTaskId && row.task_id !== scopeTaskId) continue;
+        if (scopeProjectId && row.project_id !== scopeProjectId) continue;
+        if (list.some((a) => (a as { id?: string }).id === row.id)) continue;
+
+        // Feed order is newest-first, matching the queries.
+        queryClient.setQueryData(queryKey, [row, ...list]);
+      }
+    };
+
     const channel = supabase
       .channel("taskora-realtime")
       .on(
@@ -285,21 +463,82 @@ export function RealtimeProvider({
         "postgres_changes",
         { event: "*", schema: "public", table: "profiles" },
         (payload) => {
-          const row = payload.new as Record<string, unknown> | undefined;
+          const row = (payload.new ?? payload.old) as
+            | Record<string, unknown>
+            | undefined;
           const id = row?.id as string | undefined;
-          // Scope: only the changed employee's detail + the cached team
-          // list is marked stale. No other resource is touched.
-          if (id) {
-            queryClient.invalidateQueries({
-              queryKey: qk.employeeDetail(id),
-              refetchType: "none",
-            });
+          if (!id) return;
+
+          if (payload.eventType === "DELETE") {
+            queryClient.setQueriesData<{ id: string }[]>(
+              { queryKey: qk.employeesList() },
+              (list) =>
+                Array.isArray(list) ? list.filter((m) => m.id !== id) : list
+            );
+            queryClient.setQueriesData<{ id: string }[]>(
+              { queryKey: qk.activeEmployees() },
+              (list) =>
+                Array.isArray(list) ? list.filter((m) => m.id !== id) : list
+            );
+            return;
           }
+
+          // An approval is a status/role change on a row the employees
+          // screen already lists. Patch it in place so the badge flips
+          // live instead of round-tripping through a refetch.
+          queryClient.setQueriesData<{ id: string }[]>(
+            { queryKey: qk.employeesList() },
+            (list) => {
+              if (!Array.isArray(list)) return list;
+              const at = list.findIndex((m) => m.id === id);
+              if (at === -1) return list;
+              const next = [...list];
+              next[at] = { ...next[at], ...row };
+              return next;
+            }
+          );
+          queryClient.setQueriesData<{ id: string }[]>(
+            { queryKey: qk.activeEmployees() },
+            (list) => {
+              if (!Array.isArray(list)) return list;
+              const at = list.findIndex((m) => m.id === id);
+              if (at === -1) return list;
+              const next = [...list];
+              next[at] = { ...next[at], ...row };
+              return next;
+            }
+          );
+
+          // The detail page renders fields the list cache does not carry
+          // (email, phone), so it is marked stale rather than patched.
           queryClient.invalidateQueries({
-            queryKey: qk.employeesList(),
-            refetchType: "active",
+            queryKey: qk.employeeDetail(id),
+            refetchType: "none",
           });
+
+          // A role change alters what the signed-in user may see.
+          if (id === authUserId) syncDashboard();
         }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "project_members" },
+        patchProjectMembers
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "project_resources" },
+        patchProjectResources
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "task_subtasks" },
+        patchSubtask
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "activity" },
+        patchActivity
       )
       .on(
         "postgres_changes",
