@@ -2,15 +2,17 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+export interface EmptyStateAction {
+  label: string;
+  href?: string;
+  onClick?: () => void;
+}
+
 interface EmptyStateProps {
   title: string;
   description?: string;
   icon?: React.ReactNode;
-  action?: {
-    label: string;
-    href?: string;
-    onClick?: () => void;
-  };
+  action?: EmptyStateAction;
   compact?: boolean;
   className?: string;
 }

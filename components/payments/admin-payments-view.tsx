@@ -24,10 +24,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BadgeCheck,
   Banknote,
-  Check,
   CheckCheck,
   ChevronRight,
-  Circle,
   Ellipsis,
   Eye,
   Inbox,
@@ -45,7 +43,6 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   Table,
   TableBody,
@@ -87,6 +84,27 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import {
+  DataTable,
+  DataTableBody,
+  DataTableCell,
+  DataTableHead,
+  DataTableHeader,
+  DataTableRow,
+  DataTableText,
+} from "@/components/shared/data-table";
+import {
+  FilterChip,
+  PageToolbar,
+  ToolbarActions,
+  ToolbarChips,
+  ToolbarFilters,
+  ToolbarSearch,
+} from "@/components/shared/page-toolbar";
+import { DetailSheet } from "@/components/shared/detail-sheet";
+import { ErrorMessage } from "@/components/shared/error-message";
+import { PaymentStatusBadge } from "@/components/shared/status-badge";
+import { EntityAvatar } from "@/components/shared/entity-avatar";
+import {
   createCustomPayment,
   createPaymentFromTasks,
   markPaymentPaid,
@@ -102,7 +120,13 @@ import {
   employeeDetailOptions,
 } from "@/lib/queries/options";
 import { qk } from "@/lib/queries/keys";
-import { cn, formatCurrency, formatDate, getInitials } from "@/lib/utils";
+import {
+  cn,
+  formatAbsoluteTime,
+  formatCurrency,
+  formatDate,
+  formatRelativeTime,
+} from "@/lib/utils";
 import { TASK_STATUS_DOTS, TASK_STATUS_LABELS } from "@/lib/constants";
 import type { TaskStatus } from "@/types/database";
 
@@ -115,25 +139,6 @@ type TypeFilter = "ALL" | "TASK" | "CUSTOM";
 type DateFilter = "ALL" | "WEEK" | "MONTH" | "QUARTER";
 type SortKey = "NEWEST" | "OLDEST" | "AMOUNT_DESC" | "AMOUNT_ASC";
 type WorkspaceTab = "payments" | "pending" | "paid" | "employees";
-
-/** Subtle semantic status badge — dot/text, not a giant pill. */
-function PaymentStatusBadge({ status }: { status: PaymentItem["status"] }) {
-  const paid = status === "PAID";
-  return (
-    <Badge
-      variant="secondary"
-      className={cn(
-        "gap-1 border",
-        paid
-          ? "border-transparent bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
-          : "border-transparent bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
-      )}
-    >
-      {paid ? <Check className="size-3" /> : <Circle className="size-2.5 fill-current" />}
-      {paid ? "Paid" : "Pending"}
-    </Badge>
-  );
-}
 
 /** Task payout vs custom payment — always explicit. */
 function PaymentKindBadge({ kind }: { kind: PaymentItem["kind"] }) {
@@ -158,13 +163,7 @@ function EmployeeCell({
   if (!name) return <span className="text-muted-foreground">—</span>;
   return (
     <span className="flex min-w-0 items-center gap-2">
-      <Avatar size="sm">
-        {avatarUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={avatarUrl} alt="" className="size-full rounded-full object-cover" />
-        ) : null}
-        <AvatarFallback className="text-[9px]">{getInitials(name)}</AvatarFallback>
-      </Avatar>
+      <EntityAvatar name={name} src={avatarUrl} size="sm" />
       <span className="truncate text-sm">{name}</span>
     </span>
   );
@@ -188,7 +187,7 @@ function Metric({
       <p
         className={cn(
           "mt-1 truncate text-xl font-semibold tabular-nums tracking-tight lg:text-2xl",
-          tone === "pending" && amount > 0 && "text-amber-600 dark:text-amber-400"
+          tone === "pending" && amount > 0 && "text-status-warning"
         )}
       >
         {formatCurrency(amount)}
@@ -668,11 +667,8 @@ export function AdminPaymentsView() {
     const rd = rowDate(p);
     const isBulkable = p.status === "PENDING";
     return (
-      <TableRow
-        className={cn(bulkIds.has(p.id) && "bg-accent/40")}
-        onClick={() => openDetail(p)}
-      >
-        <TableCell onClick={(e) => e.stopPropagation()} className="w-8 pr-0">
+      <DataTableRow selected={bulkIds.has(p.id)} onClick={() => openDetail(p)}>
+        <DataTableCell onClick={(e) => e.stopPropagation()} className="w-8 pr-0">
           {isBulkable && (
             <Checkbox
               checked={bulkIds.has(p.id)}
@@ -687,42 +683,42 @@ export function AdminPaymentsView() {
               aria-label={`Select payment for ${p.employee_name ?? "employee"}`}
             />
           )}
-        </TableCell>
-        <TableCell className="max-w-52">
-          <p className="truncate font-medium">{p.label}</p>
-          {p.payment_note && (
-            <p className="truncate text-xs text-muted-foreground">{p.payment_note}</p>
-          )}
-        </TableCell>
-        <TableCell>
+        </DataTableCell>
+        <DataTableCell flex className="max-w-52">
+          <DataTableText primary={p.label} secondary={p.payment_note} />
+        </DataTableCell>
+        <DataTableCell column="employee">
           <EmployeeCell name={p.employee_name} avatarUrl={avatarById.get(p.employee_id ?? "")} />
-        </TableCell>
-        <TableCell>
+        </DataTableCell>
+        <DataTableCell column="type">
           <PaymentKindBadge kind={p.kind} />
-        </TableCell>
-        <TableCell className="max-w-44">
+        </DataTableCell>
+        <DataTableCell column="project" className="max-w-44">
           {p.project_name ? (
-            <>
-              <p className="truncate text-sm">{p.project_name}</p>
-              {p.client_name && (
-                <p className="truncate text-xs text-muted-foreground">{p.client_name}</p>
-              )}
-            </>
+            <DataTableText
+              primary={p.project_name}
+              secondary={p.client_name}
+              primaryClassName="text-sm font-normal"
+            />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
-        </TableCell>
-        <TableCell className="text-right font-semibold tabular-nums">
+        </DataTableCell>
+        <DataTableCell numeric className="font-semibold">
           {formatCurrency(p.amount)}
-        </TableCell>
-        <TableCell>
-          <PaymentStatusBadge status={p.status} />
-        </TableCell>
-        <TableCell className="text-right">
-          <p className="text-sm">{rd.date ? formatDate(rd.date) : "—"}</p>
-          <p className="text-[11px] text-muted-foreground">{rd.date ? rd.label : ""}</p>
-        </TableCell>
-        <TableCell onClick={(e) => e.stopPropagation()} className="w-10 text-right">
+        </DataTableCell>
+        <DataTableCell>
+          <PaymentStatusBadge status={p.status} withIcon />
+        </DataTableCell>
+        <DataTableCell numeric>
+          <span title={rd.date ? formatAbsoluteTime(rd.date) : undefined}>
+            {rd.date ? formatDate(rd.date) : "—"}
+          </span>
+          <span className="block text-[11px] text-muted-foreground">
+            {rd.date ? formatRelativeTime(rd.date) : ""}
+          </span>
+        </DataTableCell>
+        <DataTableCell onClick={(e) => e.stopPropagation()} className="w-10 text-right">
           <DropdownMenu>
             <DropdownMenuTrigger
               className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
@@ -749,8 +745,8 @@ export function AdminPaymentsView() {
               )}
             </DropdownMenuContent>
           </DropdownMenu>
-        </TableCell>
-      </TableRow>
+        </DataTableCell>
+      </DataTableRow>
     );
   }
 
@@ -805,7 +801,7 @@ export function AdminPaymentsView() {
             <div className="text-right">
               <p className="text-sm font-semibold tabular-nums">{formatCurrency(p.amount)}</p>
               <div className="mt-0.5 flex justify-end">
-                <PaymentStatusBadge status={p.status} />
+                <PaymentStatusBadge status={p.status} withIcon />
               </div>
             </div>
             <DropdownMenu>
@@ -902,19 +898,46 @@ export function AdminPaymentsView() {
 
   if (isError || !data || !summary) {
     return (
-      <div className="rounded-xl border bg-card px-4 py-12 text-center">
-        <p className="text-sm font-medium">Couldn&apos;t load payments</p>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Check your connection and try again.
-        </p>
-        <Button type="button" variant="outline" size="sm" className="mt-4" onClick={() => void refetch()}>
-          Try again
-        </Button>
+      <div className="rounded-xl border bg-card">
+        <ErrorMessage
+          title="Couldn't load payments"
+          message="Check your connection and try again."
+          onRetry={() => void refetch()}
+        />
       </div>
     );
   }
 
   const showTable = filtered.length > 0;
+
+  /** One of three empty states, picked by what the admin is looking at. */
+  const emptyState =
+    filtersActive || tabStatus !== "ALL"
+      ? {
+          title: "No payments match your filters",
+          description: "Adjust or clear the filters to see more records.",
+          icon: <Inbox />,
+          action: {
+            label: "Clear filters",
+            onClick: () => {
+              clearFilters();
+              if (tabStatus !== "ALL") setTab("payments");
+            },
+          },
+        }
+      : counts.pending > 0
+        ? {
+            title: "No pending payouts",
+            description: "All employee payouts are currently settled.",
+            icon: <Inbox />,
+            action: { label: "View all payments", onClick: () => setTab("payments") },
+          }
+        : {
+            title: "No payments yet",
+            description: "Create the first payout for your team.",
+            icon: <Inbox />,
+            action: { label: "Create payment", onClick: openCreateSheet },
+          };
 
   return (
     <div className="space-y-6">
@@ -975,18 +998,14 @@ export function AdminPaymentsView() {
       {tab !== "employees" && (
         <div className="space-y-3">
           {/* ── Toolbar ─────────────────────────────────────── */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-44 flex-1 sm:max-w-xs">
-              <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search payments…"
-                className="pl-9"
-                aria-label="Search payments"
-              />
-            </div>
-            <div className="hidden items-center gap-2 lg:flex">
+          <PageToolbar>
+            <ToolbarSearch
+              value={search}
+              onChange={setSearch}
+              placeholder="Search payments…"
+              label="Search payments"
+            />
+            <ToolbarFilters>
               <Select
                 items={employeeFilterItems}
                 value={employeeFilter}
@@ -1052,8 +1071,8 @@ export function AdminPaymentsView() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="ml-auto flex items-center gap-2">
+            </ToolbarFilters>
+            <ToolbarActions>
               {pendingSelectHint}
               <Button
                 type="button"
@@ -1065,140 +1084,69 @@ export function AdminPaymentsView() {
                 <SlidersHorizontal className="size-4" /> Filters
                 {filtersActive && <span className="size-1.5 rounded-full bg-primary" />}
               </Button>
-            </div>
-          </div>
+            </ToolbarActions>
+          </PageToolbar>
 
           {filtersActive && (
-            <div className="flex flex-wrap items-center gap-2">
+            <ToolbarChips onClearAll={clearFilters}>
               {employeeFilter !== "ALL" && (
-                <button
-                  type="button"
-                  onClick={() => setEmployeeFilter("ALL")}
-                  className="rounded-full border bg-muted/40 px-2.5 py-0.5 text-xs font-medium transition-colors hover:bg-muted"
-                >
-                  {employeeFilterItems[employeeFilter] ?? "Employee"} ✕
-                </button>
+                <FilterChip
+                  label={employeeFilterItems[employeeFilter] ?? "Employee"}
+                  onClear={() => setEmployeeFilter("ALL")}
+                />
               )}
               {typeFilter !== "ALL" && (
-                <button
-                  type="button"
-                  onClick={() => setTypeFilter("ALL")}
-                  className="rounded-full border bg-muted/40 px-2.5 py-0.5 text-xs font-medium transition-colors hover:bg-muted"
-                >
-                  {selectItems.type[typeFilter]} ✕
-                </button>
+                <FilterChip
+                  label={selectItems.type[typeFilter]}
+                  onClear={() => setTypeFilter("ALL")}
+                />
               )}
               {dateFilter !== "ALL" && (
-                <button
-                  type="button"
-                  onClick={() => setDateFilter("ALL")}
-                  className="rounded-full border bg-muted/40 px-2.5 py-0.5 text-xs font-medium transition-colors hover:bg-muted"
-                >
-                  {selectItems.date[dateFilter]} ✕
-                </button>
+                <FilterChip
+                  label={selectItems.date[dateFilter]}
+                  onClear={() => setDateFilter("ALL")}
+                />
               )}
               {search.trim() && (
-                <button
-                  type="button"
-                  onClick={() => setSearch("")}
-                  className="rounded-full border bg-muted/40 px-2.5 py-0.5 text-xs font-medium transition-colors hover:bg-muted"
-                >
-                  “{search.trim()}” ✕
-                </button>
+                <FilterChip label={search.trim()} onClear={() => setSearch("")} />
               )}
-              <button
-                type="button"
-                onClick={clearFilters}
-                className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-              >
-                Clear all
-              </button>
-            </div>
+            </ToolbarChips>
           )}
 
           {bulkBar}
 
           {/* ── Empty state ─────────────────────────────────── */}
           {!showTable ? (
-            <div className="rounded-xl border bg-card px-4 py-12 text-center">
-              <Inbox className="mx-auto size-8 text-muted-foreground/60" />
-              {filtersActive || tabStatus !== "ALL" ? (
-                <>
-                  <p className="mt-3 text-sm font-medium">No payments match your filters</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Adjust or clear the filters to see more records.
-                  </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-4"
-                    onClick={() => {
-                      clearFilters();
-                      if (tabStatus !== "ALL") setTab("payments");
-                    }}
-                  >
-                    Clear filters
-                  </Button>
-                </>
-              ) : counts.pending > 0 ? (
-                <>
-                  <p className="mt-3 text-sm font-medium">No pending payouts</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    All employee payouts are currently settled.
-                  </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-4"
-                    onClick={() => setTab("payments")}
-                  >
-                    View all payments
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <p className="mt-3 text-sm font-medium">No payments yet</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Create the first payout for your team.
-                  </p>
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="mt-4"
-                    onClick={() => openCreateSheet()}
-                  >
-                    <Plus className="size-4" /> Create payment
-                  </Button>
-                </>
-              )}
-            </div>
+            <DataTable isEmpty empty={emptyState} containerClassName="bg-card">
+              <DataTableBody />
+            </DataTable>
           ) : (
             <>
               {/* ── Desktop table ─────────────────────────────── */}
-              <div className="hidden overflow-hidden rounded-xl border bg-card lg:block">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="w-8" />
-                      <TableHead>Payment</TableHead>
-                      <TableHead>Employee</TableHead>
-                      <TableHead>Type</TableHead>
-                      <TableHead>Project</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead className="text-right">Date</TableHead>
-                      <TableHead className="w-10" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filtered.map((p) => (
-                      <PaymentRow key={p.id} p={p} />
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
+              <DataTable
+                hideAt={{ type: "xl", project: "xl", employee: "lg" }}
+                containerClassName="hidden lg:block"
+                className="[&_td]:[&_p]:text-[13px]"
+              >
+                <DataTableHeader>
+                  <DataTableRow className="hover:bg-transparent">
+                    <DataTableHead className="w-8" />
+                    <DataTableHead>Payment</DataTableHead>
+                    <DataTableHead column="employee">Employee</DataTableHead>
+                    <DataTableHead column="type">Type</DataTableHead>
+                    <DataTableHead column="project">Project</DataTableHead>
+                    <DataTableHead numeric>Amount</DataTableHead>
+                    <DataTableHead>Status</DataTableHead>
+                    <DataTableHead numeric>Date</DataTableHead>
+                    <DataTableHead className="w-10" />
+                  </DataTableRow>
+                </DataTableHeader>
+                <DataTableBody>
+                  {filtered.map((p) => (
+                    <PaymentRow key={p.id} p={p} />
+                  ))}
+                </DataTableBody>
+              </DataTable>
 
               {/* ── Mobile cards ──────────────────────────────── */}
               <div className="divide-y rounded-xl border bg-card lg:hidden">
@@ -1257,7 +1205,7 @@ export function AdminPaymentsView() {
                           </TableCell>
                           <TableCell className="text-right">
                             {e.pending > 0 ? (
-                              <span className="font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                              <span className="font-semibold tabular-nums text-status-warning">
                                 {formatCurrency(e.pending)}
                                 <span className="ml-1.5 text-xs font-normal text-muted-foreground">
                                   {e.pendingCount} payment{e.pendingCount !== 1 ? "s" : ""}
@@ -1389,7 +1337,7 @@ export function AdminPaymentsView() {
                           >
                             <EmployeeCell name={e.name} avatarUrl={e.avatar_url} />
                             {row && row.pending > 0 && (
-                              <span className="shrink-0 text-xs font-medium tabular-nums text-amber-600 dark:text-amber-400">
+                              <span className="shrink-0 text-xs font-medium tabular-nums text-status-warning">
                                 {formatCurrency(row.pending)} pending
                               </span>
                             )}
@@ -1838,84 +1786,130 @@ export function AdminPaymentsView() {
       </Sheet>
 
       {/* ── Employee payout detail sheet ────────────────────── */}
-      <Sheet open={!!employeeSheetId} onOpenChange={(open) => !open && setEmployeeSheetId(null)}>
-        <SheetContent className="w-full gap-0 overflow-y-auto sm:max-w-md">
-          <SheetHeader className="border-b pb-4">
-            <div className="flex items-center gap-3">
-              <Avatar>
-                <AvatarFallback>{getInitials(detailEmployeeSheet?.name ?? "?")}</AvatarFallback>
-              </Avatar>
-              <div className="min-w-0">
-                <SheetTitle className="truncate text-base font-semibold">
-                  {detailEmployeeSheet?.name ?? "Employee"}
-                </SheetTitle>
-                <SheetDescription className="truncate">
-                  {employeeDetailQuery.data?.email ?? "Employee payout summary"}
-                </SheetDescription>
+      <DetailSheet
+        open={!!employeeSheetId}
+        onOpenChange={(open) => !open && setEmployeeSheetId(null)}
+        className="w-full sm:max-w-md"
+        title={
+          <span className="flex items-center gap-3">
+            <EntityAvatar name={detailEmployeeSheet?.name} size="md" />
+            <span className="min-w-0">
+              <span className="block truncate text-base font-semibold">
+                {detailEmployeeSheet?.name ?? "Employee"}
+              </span>
+              <span className="block truncate text-sm font-normal text-muted-foreground">
+                {employeeDetailQuery.data?.email ?? "Employee payout summary"}
+              </span>
+            </span>
+          </span>
+        }
+      >
+        <div className="space-y-5">
+          {detailEmployeeSheet && (
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <p className="text-xs text-muted-foreground">Pending</p>
+                <p
+                  className={cn(
+                    "mt-0.5 text-lg font-semibold tabular-nums",
+                    detailEmployeeSheet.pending > 0 && "text-status-warning"
+                  )}
+                >
+                  {formatCurrency(detailEmployeeSheet.pending)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">This month</p>
+                <p className="mt-0.5 text-lg font-semibold tabular-nums">
+                  {formatCurrency(detailEmployeeSheet.paidThisMonth)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Total paid</p>
+                <p className="mt-0.5 text-lg font-semibold tabular-nums">
+                  {formatCurrency(detailEmployeeSheet.paidTotal)}
+                </p>
               </div>
             </div>
-          </SheetHeader>
+          )}
 
-          <div className="flex-1 space-y-5 overflow-y-auto p-4">
-            {detailEmployeeSheet && (
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <p className="text-xs text-muted-foreground">Pending</p>
-                  <p
-                    className={cn(
-                      "mt-0.5 text-lg font-semibold tabular-nums",
-                      detailEmployeeSheet.pending > 0 &&
-                        "text-amber-600 dark:text-amber-400"
-                    )}
-                  >
-                    {formatCurrency(detailEmployeeSheet.pending)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">This month</p>
-                  <p className="mt-0.5 text-lg font-semibold tabular-nums">
-                    {formatCurrency(detailEmployeeSheet.paidThisMonth)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">Total paid</p>
-                  <p className="mt-0.5 text-lg font-semibold tabular-nums">
-                    {formatCurrency(detailEmployeeSheet.paidTotal)}
-                  </p>
-                </div>
-              </div>
-            )}
-
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="w-full"
-              onClick={() => {
-                const id = employeeSheetId;
-                setEmployeeSheetId(null);
-                openCreateSheet(id ?? undefined);
-              }}
-            >
-              <Plus className="size-4" /> Create payment
-            </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="w-full"
+            onClick={() => {
+              const id = employeeSheetId;
+              setEmployeeSheetId(null);
+              openCreateSheet(id ?? undefined);
+            }}
+          >
+            <Plus className="size-4" /> Create payment
+          </Button>
 
             {/* Pending payouts */}
-            <section className="space-y-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Pending payouts
-              </h3>
-              {(() => {
-                const rows = employeeHistory.filter((p) => p.status === "PENDING");
-                if (rows.length === 0)
-                  return (
-                    <p className="rounded-lg border px-3 py-4 text-center text-xs text-muted-foreground">
-                      Nothing pending — all payouts are settled.
-                    </p>
-                  );
+          <section className="space-y-2">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Pending payouts
+            </h3>
+            {(() => {
+              const rows = employeeHistory.filter((p) => p.status === "PENDING");
+              if (rows.length === 0)
                 return (
-                  <div className="divide-y rounded-lg border bg-card">
-                    {rows.map((p) => (
+                  <p className="rounded-lg border px-3 py-4 text-center text-xs text-muted-foreground">
+                    Nothing pending — all payouts are settled.
+                  </p>
+                );
+              return (
+                <div className="divide-y rounded-lg border bg-card">
+                  {rows.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setEmployeeSheetId(null);
+                        openDetail(p);
+                      }}
+                      className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-accent/50"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{p.label}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {p.kind === "TASK" ? "Task payout" : "Custom"}
+                          {p.project_name ? ` · ${p.project_name}` : ""}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-sm font-semibold tabular-nums text-status-warning">
+                        {formatCurrency(p.amount)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
+          </section>
+
+            {/* Payment history */}
+          <section className="space-y-2">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Payment history
+            </h3>
+            {employeeHistory.length === 0 ? (
+              <p className="rounded-lg border px-3 py-4 text-center text-xs text-muted-foreground">
+                No payments for this employee yet.
+              </p>
+            ) : (
+              <div className="divide-y rounded-lg border bg-card">
+                {employeeHistory
+                  .slice()
+                  .sort(
+                    (a, b) =>
+                      new Date(rowDate(b).date ?? 0).getTime() -
+                      new Date(rowDate(a).date ?? 0).getTime()
+                  )
+                  .map((p) => {
+                    const rd = rowDate(p);
+                    return (
                       <button
                         key={p.id}
                         type="button"
@@ -1928,68 +1922,20 @@ export function AdminPaymentsView() {
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium">{p.label}</p>
                           <p className="truncate text-xs text-muted-foreground">
-                            {p.kind === "TASK" ? "Task payout" : "Custom"}
-                            {p.project_name ? ` · ${p.project_name}` : ""}
+                            {rd.date ? `${rd.label} ${formatDate(rd.date)}` : "Pending"}
                           </p>
                         </div>
-                        <span className="shrink-0 text-sm font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                        <span className="shrink-0 text-sm font-semibold tabular-nums">
                           {formatCurrency(p.amount)}
                         </span>
                       </button>
-                    ))}
-                  </div>
-                );
-              })()}
-            </section>
-
-            {/* Payment history */}
-            <section className="space-y-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Payment history
-              </h3>
-              {employeeHistory.length === 0 ? (
-                <p className="rounded-lg border px-3 py-4 text-center text-xs text-muted-foreground">
-                  No payments for this employee yet.
-                </p>
-              ) : (
-                <div className="divide-y rounded-lg border bg-card">
-                  {employeeHistory
-                    .slice()
-                    .sort(
-                      (a, b) =>
-                        new Date(rowDate(b).date ?? 0).getTime() -
-                        new Date(rowDate(a).date ?? 0).getTime()
-                    )
-                    .map((p) => {
-                      const rd = rowDate(p);
-                      return (
-                        <button
-                          key={p.id}
-                          type="button"
-                          onClick={() => {
-                            setEmployeeSheetId(null);
-                            openDetail(p);
-                          }}
-                          className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-accent/50"
-                        >
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium">{p.label}</p>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {rd.date ? `${rd.label} ${formatDate(rd.date)}` : "Pending"}
-                            </p>
-                          </div>
-                          <span className="shrink-0 text-sm font-semibold tabular-nums">
-                            {formatCurrency(p.amount)}
-                          </span>
-                        </button>
-                      );
-                    })}
-                </div>
-              )}
-            </section>
-          </div>
-        </SheetContent>
-      </Sheet>
+                    );
+                  })}
+              </div>
+            )}
+          </section>
+        </div>
+      </DetailSheet>
 
       {/* ── Bulk mark-paid confirmation ─────────────────────── */}
       <Dialog open={bulkConfirmOpen} onOpenChange={setBulkConfirmOpen}>

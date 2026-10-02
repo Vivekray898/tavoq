@@ -1,7 +1,7 @@
 // /lib/utils.ts
 export { cn } from "cn";
 
-import { CURRENCY_SYMBOL } from "./constants";
+import { CURRENCY_SYMBOL } from "./constants.ts";
 
 /**
  * Format a number as currency (INR).
@@ -103,6 +103,60 @@ export function formatTime(dateStr: string): string {
 }
 
 /**
+ * Relative time for dense surfaces ("2h ago"), with the absolute time
+ * available alongside for a tooltip.
+ *
+ * Deliberately coarse: a productivity list shows "3m ago", not
+ * "3 minutes and 12 seconds ago". Future timestamps read "in 2h" so a
+ * clock skew never renders as a confusing negative age.
+ */
+export function formatRelativeTime(dateStr: string | null | undefined): string {
+  if (!dateStr) return "—";
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) return "—";
+
+  const diffMs = Date.now() - date.getTime();
+  const abs = Math.abs(diffMs);
+  const future = diffMs < 0;
+
+  const seconds = Math.round(abs / 1000);
+  if (seconds < 45) return future ? "in a moment" : "just now";
+
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return future ? `in ${minutes}m` : `${minutes}m ago`;
+
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return future ? `in ${hours}h` : `${hours}h ago`;
+
+  const days = Math.round(hours / 24);
+  if (days < 7) return future ? `in ${days}d` : `${days}d ago`;
+
+  const weeks = Math.round(days / 7);
+  if (weeks < 5) return future ? `in ${weeks}w` : `${weeks}w ago`;
+
+  // Beyond a month, an absolute date is more useful than a count.
+  return formatDate(dateStr);
+}
+
+/**
+ * Full timestamp for a tooltip or `title` attribute, e.g.
+ * "3 Feb 2026, 4:15 PM".
+ */
+export function formatAbsoluteTime(dateStr: string | null | undefined): string {
+  if (!dateStr) return "";
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) return "";
+  return date.toLocaleString("en-IN", {
+    timeZone: IST_TZ,
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/**
  * Natural deadline display (§29):
  *   "Due today · 6:00 PM"
  *   "Due tomorrow · 10:00 AM"
@@ -190,19 +244,17 @@ export function isDueSoon(deadline: string | null): boolean {
 }
 
 /**
- * Get initials from a name. Safe for null/empty input.
+ * Monogram for an avatar: first letter of the first and last name.
+ *
+ * First + last rather than the first two words, so "Ada Byron
+ * Lovelace" reads as "AL" and not "AB". Safe for null/empty input.
  */
 export function getInitials(name: string | null | undefined): string {
   if (!name) return "?";
-  const initials = name
-    .trim()
-    .split(/\s+/)
-    .map((n) => n[0])
-    .filter(Boolean)
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
-  return initials || "?";
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 /**

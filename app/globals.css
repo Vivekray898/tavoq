@@ -45,6 +45,16 @@
   --color-warning-foreground: var(--warning-foreground);
   --color-info: var(--info);
   --color-info-foreground: var(--info-foreground);
+  --color-status-success: var(--status-success);
+  --color-status-success-fg: var(--status-success-fg);
+  --color-status-warning: var(--status-warning);
+  --color-status-warning-fg: var(--status-warning-fg);
+  --color-status-danger: var(--status-danger);
+  --color-status-danger-fg: var(--status-danger-fg);
+  --color-status-info: var(--status-info);
+  --color-status-info-fg: var(--status-info-fg);
+  --color-status-neutral: var(--status-neutral);
+  --color-status-neutral-fg: var(--status-neutral-fg);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -93,6 +103,32 @@
   --warning-foreground: oklch(0.205 0 0);
   --info: oklch(0.666 0.179 250.814);
   --info-foreground: oklch(0.985 0 0);
+
+  /* ── Semantic status palette ──
+   *
+   * One definition for every status colour, so a task status, a
+   * payment status and a priority all read from the same place instead
+   * of each screen hard-coding `text-emerald-600 dark:text-emerald-400`.
+   *
+   * `-fg` is the foreground that meets AA on a `-muted` background;
+   * `-muted` is the soft fill used behind badges. Both are defined in
+   * light and dark so a badge never inverts unlegibly.
+   */
+  --status-success: oklch(0.596 0.145 163.225);
+  --status-success-fg: oklch(0.42 0.12 163.225);
+  --status-success-muted: oklch(0.94 0.04 163.225);
+  --status-warning: oklch(0.768 0.189 70.08);
+  --status-warning-fg: oklch(0.47 0.13 62);
+  --status-warning-muted: oklch(0.96 0.05 78);
+  --status-danger: oklch(0.577 0.245 27.325);
+  --status-danger-fg: oklch(0.51 0.21 27.325);
+  --status-danger-muted: oklch(0.96 0.03 27.325);
+  --status-info: oklch(0.666 0.179 250.814);
+  --status-info-fg: oklch(0.45 0.15 250.814);
+  --status-info-muted: oklch(0.95 0.03 250.814);
+  --status-neutral: oklch(0.556 0 0);
+  --status-neutral-fg: oklch(0.45 0 0);
+  --status-neutral-muted: oklch(0.96 0 0);
 }
 
 .dark {
@@ -133,6 +169,24 @@
   --warning-foreground: oklch(0.205 0 0);
   --info: oklch(0.707 0.179 250.814);
   --info-foreground: oklch(0.985 0 0);
+
+  /* Dark parity: the base colours lighten, and the soft fills darken so
+     they still read as a tint rather than a block. */
+  --status-success: oklch(0.648 0.15 160);
+  --status-success-fg: oklch(0.78 0.14 160);
+  --status-success-muted: oklch(0.28 0.05 160);
+  --status-warning: oklch(0.828 0.189 70.08);
+  --status-warning-fg: oklch(0.84 0.14 78);
+  --status-warning-muted: oklch(0.3 0.06 70);
+  --status-danger: oklch(0.704 0.191 22.216);
+  --status-danger-fg: oklch(0.75 0.16 22);
+  --status-danger-muted: oklch(0.29 0.07 22);
+  --status-info: oklch(0.707 0.179 250.814);
+  --status-info-fg: oklch(0.76 0.13 250.814);
+  --status-info-muted: oklch(0.29 0.06 250.814);
+  --status-neutral: oklch(0.708 0 0);
+  --status-neutral-fg: oklch(0.72 0 0);
+  --status-neutral-muted: oklch(0.28 0 0);
 }
 
 @layer base {
@@ -176,5 +230,82 @@
   }
   .text-destructive {
     color: var(--destructive);
+  }
+}
+
+/* ── Status tones ────────────────────────────────
+ *
+ * Consumed by StatusBadge and by any inline status text, so a colour
+ * is decided in ONE place. Each has a subtle background + a foreground
+ * that meets AA contrast in both modes — never colour alone, which is
+ * why StatusBadge also always renders a label or a dot.
+ */
+@layer utilities {
+  .status-success {
+    color: var(--status-success-fg);
+    background-color: var(--status-success-muted);
+  }
+  .status-warning {
+    color: var(--status-warning-fg);
+    background-color: var(--status-warning-muted);
+  }
+  .status-danger {
+    color: var(--status-danger-fg);
+    background-color: var(--status-danger-muted);
+  }
+  .status-info {
+    color: var(--status-info-fg);
+    background-color: var(--status-info-muted);
+  }
+  .status-neutral {
+    color: var(--status-neutral-fg);
+    background-color: var(--status-neutral-muted);
+  }
+
+  /* Text-only variants, for status copy that sits on a card rather than
+     inside a badge. */
+  .text-status-success {
+    color: var(--status-success-fg);
+  }
+  .text-status-warning {
+    color: var(--status-warning-fg);
+  }
+  .text-status-danger {
+    color: var(--status-danger-fg);
+  }
+  .text-status-info {
+    color: var(--status-info-fg);
+  }
+}
+
+/* ── Density standard ────────────────────────────
+ *
+ * Fixed heights only for the cases where the contract really is a
+ * constant: filter bars, settings rows and touch targets. Table rows
+ * are padded rather than sized (see DataTable's `density`) so a cell
+ * with a second line of context grows instead of clipping.
+ */
+@layer utilities {
+  .row-compact {
+    height: 2rem; /* 32px — dense filter bars */
+  }
+  .row-default {
+    height: 2.5rem; /* 40px — the default list row */
+  }
+  .row-comfortable {
+    height: 3rem; /* 48px — settings, forms, touch-friendly */
+  }
+}
+
+/* Respect the OS setting: kill every transition rather than merely
+   shortening it, so nothing moves unexpectedly. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
