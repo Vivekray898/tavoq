@@ -1,47 +1,94 @@
 import { createClient } from "@/lib/supabase/server";
+import { cache } from "react";
 import type { Profile, UserRole } from "@/types/database";
 
 /**
- * Get the current authenticated user's profile.
- * Returns null if not authenticated.
+ * The columns every server-side identity gate needs from `profiles`.
+ * Narrow on purpose: auth.ts runs on the critical path of every page
+ * and server action, and `select *` on this table drags avatar/email/
+ * preference columns across the wire for no reason.
  */
-export async function getUserProfile(): Promise<Profile | null> {
+const PROFILE_COLUMNS = [
+  "id",
+  "full_name",
+  "email",
+  "avatar_url",
+  "role",
+  "status",
+  "phone",
+  "active",
+  "approved_at",
+  "approved_by",
+  "created_at",
+  "updated_at",
+].join(", ");
+
+/**
+ * The columns the dashboard layout and session context actually consume
+ * at bootstrap (greeting, avatar, notification preferences). Narrow on
+ * purpose: this read sits on the render path of every first load, and
+ * `select *` also drags the PostgREST schema cache into the response.
+ */
+const SESSION_PROFILE_COLUMNS = [
+  "id",
+  "full_name",
+  "email",
+  "avatar_url",
+  "role",
+  "status",
+  "updated_at",
+].join(", ");
+
+/**
+ * Verify the request's JWT locally (ES256 asymmetric keys — no auth
+ * server round-trip) and load the profile. Cached per request: the
+ * dashboard layout, the page below it, and every server action fired
+ * during first load share ONE verification + ONE profiles read.
+ */
+export const getUserProfile = cache(async (): Promise<Profile | null> => {
   const supabase = await createClient();
 
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser();
+  const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
 
-  if (authError || !user) {
-    return null;
+  // getClaims() is the fast path (local ES256 verification, no network).
+  // getUser() stays as the fallback so auth still works if the project
+  // ever switches back to symmetric JWT signing keys.
+  if (claimsError || !claimsData) {
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+    if (authError || !user) return null;
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select(PROFILE_COLUMNS)
+      .eq("id", user.id)
+      .single();
+    if (profileError || !profile) return null;
+    return profile as unknown as Profile;
   }
+
+  const userId = (claimsData.claims.sub as string) ?? null;
+  if (!userId) return null;
 
   const { data: profile, error: profileError } = await supabase
     .from("profiles")
-    .select("*")
-    .eq("id", user.id)
+    .select(SESSION_PROFILE_COLUMNS)
+    .eq("id", userId)
     .single();
 
-  if (profileError || !profile) {
-    return null;
-  }
-
-  return profile as Profile;
-}
+  if (profileError || !profile) return null;
+  return profile as unknown as Profile;
+});
 
 /**
  * Get the current user ID.
  * Returns null if not authenticated.
  */
 export async function getUserId(): Promise<string | null> {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  return user?.id ?? null;
+  const profile = await getUserProfile();
+  return profile?.id ?? null;
 }
 
 /**
@@ -168,12 +215,12 @@ export async function getActiveEmployees(): Promise<Profile[]> {
 
   const { data, error } = await supabase
     .from("profiles")
-    .select("*")
+    .select(PROFILE_COLUMNS)
     .eq("role", "EMPLOYEE")
     .eq("status", "ACTIVE")
     .order("full_name");
 
   if (error || !data) return [];
 
-  return data as Profile[];
+  return data as unknown as Profile[];
 }

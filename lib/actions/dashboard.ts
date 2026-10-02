@@ -47,7 +47,16 @@ export async function getAdminDashboard(): Promise<
   ActionResponse<AdminDashboardData>
 > {
   try {
-    await requireActiveAdmin();
+    // Auth and the read batch run concurrently: both are RLS-scoped
+    // reads against the user's own cookie session, so nothing can leak
+    // across users. The auth result is still checked BEFORE the data is
+    // returned — an unauthorized caller gets the same "Failed to load
+    // dashboard" as before. This collapses two sequential round-trips
+    // (auth ≈ 0.5s, then queries) into the time of the slowest query.
+    const authPromise = requireActiveAdmin().then(
+      () => true,
+      () => false
+    );
     const supabase = await createClient();
 
     const now = new Date();
@@ -59,6 +68,7 @@ export async function getAdminDashboard(): Promise<
     const endIso = endOfToday.toISOString();
 
     const [
+      isAuthorized,
       dueTodayRes,
       reviewRes,
       overdueRes,
@@ -69,6 +79,7 @@ export async function getAdminDashboard(): Promise<
       activityRes,
     ] =
       await Promise.all([
+        authPromise,
         supabase
           .from("tasks")
           .select("*", { count: "exact", head: true })
@@ -124,6 +135,10 @@ export async function getAdminDashboard(): Promise<
           .limit(6),
       ]);
 
+    if (!isAuthorized) {
+      return { success: false, error: "Failed to load dashboard" };
+    }
+
     const needs_attention: AdminDashboardData["needs_attention"] = (
       submittedRes.data ?? []
     ).map(
@@ -148,14 +163,23 @@ export async function getAdminDashboard(): Promise<
       }
     );
 
-    // Overdue tasks also need attention
-    const { data: overdueTasks } = await supabase
+    // Overdue tasks also need attention — folded into the same batch
+    // (it only depends on data already scoped above).
+    const overdueTasksPromise = supabase
       .from("tasks")
       .select("id, title, deadline, assigned_user:profiles!tasks_assigned_to_fkey(full_name)")
       .lt("deadline", startIso)
       .not("status", "in", '("COMPLETED")')
       .order("deadline", { ascending: true })
       .limit(4);
+
+    const [{ data: overdueTasks }, authorizedAgain] = await Promise.all([
+      overdueTasksPromise,
+      authPromise,
+    ]);
+    if (!authorizedAgain) {
+      return { success: false, error: "Failed to load dashboard" };
+    }
 
     (overdueTasks ?? []).forEach(
       (row: {

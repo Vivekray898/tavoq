@@ -29,6 +29,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.116.0
         version: 2.116.0
+      '@tanstack/query-persist-client-core':
+        specifier: ^5.103.1
+        version: 5.103.1
       '@tanstack/react-query':
         specifier: ^5.103.1
         version: 5.103.1(react@19.2.8)
@@ -1137,6 +1140,9 @@ packages:
 
   '@tanstack/query-core@5.103.1':
     resolution: {integrity: sha512-rms8HqTGp6zA00dM+cUQ2eBcgzNJefuu5CAMB37i/6MiGT1zulPOytCFu2a0qjLqVR2n1jENPj9woqFQNuCzWA==}
+
+  '@tanstack/query-persist-client-core@5.103.1':
+    resolution: {integrity: sha512-ybirgB/kkFeMDk97W1ZTH09Wy5zageg6bC1LkxKFUCRFRbsGD+nm9+WVFVllce34O6aKWR3XDBBk2G04bpJYYg==}
 
   '@tanstack/react-query@5.103.1':
     resolution: {integrity: sha512-rmAPPApNEK17VXRJhtE1rja53n23VV5w30C0saCgJhhX+EpdUnVqMGV/s5nnzV43X75KTHKzuoiuxSzGTBIkag==}
@@ -4444,6 +4450,10 @@ snapshots:
       tailwindcss: 4.3.3
 
   '@tanstack/query-core@5.103.1': {}
+
+  '@tanstack/query-persist-client-core@5.103.1':
+    dependencies:
+      '@tanstack/query-core': 5.103.1
 
   '@tanstack/react-query@5.103.1(react@19.2.8)':
     dependencies:
