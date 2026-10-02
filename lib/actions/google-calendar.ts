@@ -26,6 +26,13 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireAuth } from "@/lib/auth";
 import { decryptToken, encryptToken } from "@/lib/crypto/google-token";
+import {
+  buildAuthorizeParams,
+  buildEventBody,
+  callbackRedirectUri,
+  normalizeAppUrl,
+  type SyncableTask,
+} from "@/lib/google/calendar";
 import type { ActionResponse } from "@/types/database";
 
 // ──────────────────────────────────────────────
@@ -35,6 +42,8 @@ import type { ActionResponse } from "@/types/database";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
+/** calendar/v3/users/me is retired; this is the supported replacement. */
+const USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo";
 
 /** Minimal write scope — enough to create/update our own events. */
 const SCOPES = [
@@ -76,8 +85,7 @@ function requireEnv(name: string): string {
 }
 
 function appUrl(): string {
-  const raw = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-  return raw.replace(/\/+$/, "");
+  return normalizeAppUrl(process.env.NEXT_PUBLIC_APP_URL);
 }
 
 function randomState(): string {
@@ -286,14 +294,10 @@ export async function connectGoogleCalendar(): Promise<ActionResponse<{ url: str
     const profile = await requireAuth();
     const state = randomState();
 
-    const params = new URLSearchParams({
-      client_id: requireEnv("GOOGLE_CLIENT_ID"),
-      redirect_uri: `${appUrl()}/api/auth/google/callback`,
-      response_type: "code",
-      scope: SCOPES.join(" "),
-      access_type: "offline",
-      prompt: "consent",
-      include_granted_scopes: "true",
+    const params = buildAuthorizeParams({
+      clientId: requireEnv("GOOGLE_CLIENT_ID"),
+      redirectUri: callbackRedirectUri(appUrl()),
+      scopes: SCOPES,
       state,
     });
 
@@ -328,14 +332,14 @@ export async function connectGoogleCalendar(): Promise<ActionResponse<{ url: str
 export async function handleGoogleCallback(
   code: string,
   userId: string
-): Promise<ActionResponse<{ googleEmail: string }>> {
+): Promise<ActionResponse<{ googleEmail: string | null }>> {
   try {
     const json = await postToken({
       grant_type: "authorization_code",
       code,
       client_id: requireEnv("GOOGLE_CLIENT_ID"),
       client_secret: requireEnv("GOOGLE_CLIENT_SECRET"),
-      redirect_uri: `${appUrl()}/api/auth/google/callback`,
+      redirect_uri: callbackRedirectUri(appUrl()),
     });
 
     if (json.error || !json.access_token) {
@@ -346,28 +350,52 @@ export async function handleGoogleCallback(
     }
 
     if (!json.refresh_token) {
+      // Log the whole response: without it there is no way to tell an
+      // already-consented user from a revoked grant or a non-test-user
+      // in Testing, and all three look identical from the UI.
+      console.error(
+        "[google] no refresh_token in callback response",
+        JSON.stringify({
+          has_access_token: !!json.access_token,
+          scope: json.scope,
+          expires_in: json.expires_in,
+        })
+      );
       return {
         success: false,
-        error:
-          "Google didn't return a refresh token. Revoke the app's access and reconnect.",
+        error: "NO_REFRESH_TOKEN",
       };
     }
 
     // Identify which Google account was linked.
-    const profileRes = await fetch(`${CALENDAR_API}/users/me`, {
+    //
+    // This used to call calendar/v3/users/me, which Google has since
+    // removed — it answers 404 for every token, so the failure was
+    // swallowed and the literal string "unknown" was stored and shown
+    // as the connected address. The OAuth userinfo endpoint is the
+    // supported replacement and accepts the calendar scope.
+    const profileRes = await fetch(USERINFO_ENDPOINT, {
       headers: { Authorization: `Bearer ${json.access_token}` },
       cache: "no-store",
     });
+    if (!profileRes.ok) {
+      console.error(
+        "[google] users/me lookup failed",
+        profileRes.status,
+        profileRes.statusText,
+        await profileRes.text().catch(() => "")
+      );
+    }
     const profileJson = profileRes.ok
       ? ((await profileRes.json()) as { id?: string; email?: string })
       : {};
-    const googleEmail = profileJson.email ?? "unknown";
+    const googleEmail = profileJson.email ?? null;
 
     const admin = createAdminClient();
     const { error } = await admin.from("user_google_tokens").upsert(
       {
         user_id: userId,
-        google_email: googleEmail,
+        google_email: googleEmail ?? "unknown",
         refresh_token: encryptToken(json.refresh_token),
         access_token: json.access_token,
         access_token_expires_at: new Date(
@@ -431,60 +459,6 @@ export async function disconnectGoogleCalendar(): Promise<ActionResponse> {
 // ──────────────────────────────────────────────
 // Outbound sync: task → calendar event
 // ──────────────────────────────────────────────
-
-interface SyncableTask {
-  id: string;
-  title: string;
-  description: string | null;
-  status: string;
-  priority: string;
-  deadline: string | null;
-  project_id: string;
-  google_event_id: string | null;
-  project?: { name: string; client?: { name: string } | null } | null;
-}
-
-/** An all-day event on the deadline; a 1h timed event when there is none. */
-function buildEventBody(task: SyncableTask): Record<string, unknown> {
-  const projectName = task.project?.name ?? "";
-  const clientName = task.project?.client?.name ?? "";
-
-  const descriptionLines = [
-    task.description?.trim() || "",
-    projectName ? `Project: ${projectName}` : "",
-    clientName ? `Client: ${clientName}` : "",
-    `Priority: ${task.priority}`,
-    `Status: ${task.status}`,
-    `Taskora task id: ${task.id}`,
-  ].filter(Boolean);
-
-  const body: Record<string, unknown> = {
-    summary: task.title,
-    description: descriptionLines.join("\n"),
-    // The task id is stable, so re-running sync updates in place
-    // instead of creating duplicate events.
-    extendedProperties: { private: { taskoraTaskId: task.id } },
-  };
-
-  if (task.deadline) {
-    const date = new Date(task.deadline);
-    if (!isNaN(date.getTime())) {
-      // All-day events use an exclusive end date.
-      const end = new Date(date.getTime() + 24 * 60 * 60 * 1000);
-      body.start = { date: date.toISOString().slice(0, 10) };
-      body.end = { date: end.toISOString().slice(0, 10) };
-    }
-  } else {
-    const start = new Date();
-    body.start = { dateTime: start.toISOString(), timeZone: "UTC" };
-    body.end = {
-      dateTime: new Date(start.getTime() + 60 * 60 * 1000).toISOString(),
-      timeZone: "UTC",
-    };
-  }
-
-  return body;
-}
 
 export interface SyncResult {
   created: number;

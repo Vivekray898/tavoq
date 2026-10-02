@@ -11,7 +11,6 @@ import {
   connectGoogleCalendar,
   disconnectGoogleCalendar,
   syncAllTasksToCalendar,
-  incrementalSync,
   setupWatchChannel,
 } from "@/lib/actions/google-calendar";
 
@@ -44,6 +43,10 @@ export function GoogleCalendarConnect() {
       toast.error("Couldn't connect Google Calendar. Try again.");
     } else if (result === "invalid") {
       toast.error("That connection request expired. Try again.");
+    } else if (result === "no_refresh_token") {
+      toast.error(
+        "Google didn't return a refresh token. Revoke Taskora's calendar access at myaccount.google.com, then reconnect."
+      );
     }
 
     // Strip the flag so a refresh doesn't re-toast.
@@ -64,20 +67,37 @@ export function GoogleCalendarConnect() {
 
   async function handleSync() {
     setWorking("sync");
-    // First run has no cursor, so ask for a full sync; afterwards the
-    // incremental path only pulls what changed.
-    const result = data?.lastSyncedAt ? await incrementalSync() : await syncAllTasksToCalendar();
+    // Always the full sync. It is idempotent — a task that already has
+    // an event id is PUT, one without is POSTed — so it is the only
+    // path that can create a missing event.
+    //
+    // This used to branch on `lastSyncedAt` and fall through to the
+    // incremental path, which only ever processes deletions the user
+    // made in Google. That made "Sync now" report "already up to date"
+    // no matter what, including after newly assigned tasks were added.
+    const result = await syncAllTasksToCalendar();
     setWorking(null);
 
     if (result.success && result.data) {
-      const { created, updated, removed } = result.data;
-      toast.success(
-        created + updated + removed === 0
-          ? "Calendar is already up to date"
-          : `Synced — ${created} added, ${updated} updated${
-              removed ? `, ${removed} removed` : ""
-            }`
-      );
+      const { created, updated, removed, errors } = result.data;
+
+      // A per-task Google failure is collected rather than thrown, so
+      // reporting only the totals would show a successful sync over a
+      // list where every single insert failed.
+      if (errors.length > 0) {
+        toast.error(
+          `Synced with ${errors.length} error${errors.length === 1 ? "" : "s"} — ${errors[0]}`
+        );
+      } else {
+        toast.success(
+          created + updated + removed === 0
+            ? "Calendar is already up to date"
+            : `Synced — ${created} added, ${updated} updated${
+                removed ? `, ${removed} removed` : ""
+              }`
+        );
+      }
+
       await queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
     } else {
       toast.error(result.error ?? "Couldn't sync with Google Calendar");

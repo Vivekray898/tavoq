@@ -65,6 +65,13 @@ export async function GET(request: Request) {
 
   const result = await handleGoogleCallback(code, user.id);
 
-  profileUrl.searchParams.set("gcal", result.success ? "connected" : "error");
+  // A missing refresh token is the single most common OAuth failure and
+  // it looks identical to every other error from the user's side, so it
+  // gets its own flag instead of collapsing into "error".
+  if (!result.success && result.error === "NO_REFRESH_TOKEN") {
+    profileUrl.searchParams.set("gcal", "no_refresh_token");
+  } else {
+    profileUrl.searchParams.set("gcal", result.success ? "connected" : "error");
+  }
   return NextResponse.redirect(profileUrl);
 }
