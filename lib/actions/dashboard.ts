@@ -67,6 +67,19 @@ export async function getAdminDashboard(): Promise<
     const startIso = startOfToday.toISOString();
     const endIso = endOfToday.toISOString();
 
+    // Overdue tasks, folded into the same wave. This query used to be
+    // started only AFTER the batch above resolved, which put a second
+    // serial round-trip on the critical path for a read that depends on
+    // nothing but `supabase` and `startIso`. Issuing it up front makes
+    // the dashboard one wave instead of two.
+    const overdueTasksPromise = supabase
+      .from("tasks")
+      .select("id, title, deadline, assigned_user:profiles!tasks_assigned_to_fkey(full_name)")
+      .lt("deadline", startIso)
+      .not("status", "in", '("COMPLETED")')
+      .order("deadline", { ascending: true })
+      .limit(4);
+
     const [
       isAuthorized,
       dueTodayRes,
@@ -77,6 +90,7 @@ export async function getAdminDashboard(): Promise<
       pendingPayRes,
       pendingApprovalsRes,
       activityRes,
+      overdueTasksRes,
     ] =
       await Promise.all([
         authPromise,
@@ -133,6 +147,7 @@ export async function getAdminDashboard(): Promise<
           )
           .order("created_at", { ascending: false })
           .limit(6),
+        overdueTasksPromise,
       ]);
 
     if (!isAuthorized) {
@@ -163,20 +178,10 @@ export async function getAdminDashboard(): Promise<
       }
     );
 
-    // Overdue tasks also need attention — folded into the same batch
-    // (it only depends on data already scoped above).
-    const overdueTasksPromise = supabase
-      .from("tasks")
-      .select("id, title, deadline, assigned_user:profiles!tasks_assigned_to_fkey(full_name)")
-      .lt("deadline", startIso)
-      .not("status", "in", '("COMPLETED")')
-      .order("deadline", { ascending: true })
-      .limit(4);
-
-    const [{ data: overdueTasks }, authorizedAgain] = await Promise.all([
-      overdueTasksPromise,
-      authPromise,
-    ]);
+    // Overdue tasks also need attention. The query was already issued
+    // in the batch above, so this only awaits it — no new round-trip.
+    const overdueTasks = overdueTasksRes.data;
+    const authorizedAgain = await authPromise;
     if (!authorizedAgain) {
       return { success: false, error: "Failed to load dashboard" };
     }
@@ -326,7 +331,11 @@ export async function getEmployeeDashboard(): Promise<
     const startIso = startOfToday.toISOString();
     const endIso = endOfToday.toISOString();
 
-    const { data: tasks, error } = await supabase
+    // Both reads are independent — neither filters on the other's result —
+    // so they are issued together. They used to be awaited one after the
+    // other, which put two serial round-trips on the critical path of
+    // every employee's first screen.
+    const activeTasksPromise = supabase
       .from("tasks")
       .select(
         "id, title, status, priority, deadline, payout_amount, payment_status, completed_at, updated_at, project:projects(name)"
@@ -336,12 +345,7 @@ export async function getEmployeeDashboard(): Promise<
       .order("deadline", { ascending: true, nullsFirst: false })
       .limit(50);
 
-    if (error) {
-      console.error("[getEmployeeDashboard]", error);
-      return { success: false, error: "Failed to load your tasks" };
-    }
-
-    const { data: completedTasks } = await supabase
+    const completedTasksPromise = supabase
       .from("tasks")
       .select(
         "id, title, completed_at, payment_status, payout_amount, project:projects(name)"
@@ -350,6 +354,19 @@ export async function getEmployeeDashboard(): Promise<
       .eq("status", "COMPLETED")
       .order("completed_at", { ascending: false })
       .limit(5);
+
+    const [activeTasksRes, completedTasksRes] = await Promise.all([
+      activeTasksPromise,
+      completedTasksPromise,
+    ]);
+
+    const { data: tasks, error } = activeTasksRes;
+    const { data: completedTasks } = completedTasksRes;
+
+    if (error) {
+      console.error("[getEmployeeDashboard]", error);
+      return { success: false, error: "Failed to load your tasks" };
+    }
 
     const mapProject = (row: { project: { name: string }[] | { name: string } | null }) => {
       const p = Array.isArray(row.project) ? row.project[0] : row.project;

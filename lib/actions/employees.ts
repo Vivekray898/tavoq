@@ -272,21 +272,19 @@ export async function getEmployeeProfile(
     await requireStaff();
     const supabase = await createClient();
 
-    const { data: employee, error } = await supabase
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    // Both reads key off the `id` argument, so they are issued together
+    // rather than the task list waiting on the profile round-trip.
+    const employeePromise = supabase
       .from("profiles")
       .select("id, full_name, email, avatar_url, phone, active, created_at")
       .eq("id", id)
       .single();
 
-    if (error || !employee) {
-      return { success: false, error: "Employee not found" };
-    }
-
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
-
-    const { data: tasks } = await supabase
+    const tasksPromise = supabase
       .from("tasks")
       .select(
         "id, title, status, deadline, completed_at, project:projects(name), payment_status, payout_amount"
@@ -294,6 +292,15 @@ export async function getEmployeeProfile(
       .eq("assigned_to", id)
       .order("created_at", { ascending: false })
       .limit(100);
+
+    const [{ data: employee, error }, { data: tasks }] = await Promise.all([
+      employeePromise,
+      tasksPromise,
+    ]);
+
+    if (error || !employee) {
+      return { success: false, error: "Employee not found" };
+    }
 
     const all = tasks ?? [];
     const active = all.filter(

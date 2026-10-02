@@ -20,17 +20,22 @@ export async function getClients(
       ? query.eq("active", false)
       : query.eq("active", true);
 
-    const { data, error } = await query;
+    // The per-client project counts do not depend on the client rows —
+    // they are keyed by client_id on the projects side — so both reads
+    // are in flight together rather than one after the other.
+    const projectsPromise = supabase
+      .from("projects")
+      .select("client_id")
+      .neq("status", "ARCHIVED");
+
+    const [{ data, error }, { data: projects }] = await Promise.all([
+      query,
+      projectsPromise,
+    ]);
     if (error) {
       console.error("[getClients]", error);
       return { success: false, error: "Failed to load clients" };
     }
-
-    // Count non-archived projects per client
-    const { data: projects } = await supabase
-      .from("projects")
-      .select("client_id")
-      .neq("status", "ARCHIVED");
 
     const counts = new Map<string, number>();
     (projects ?? []).forEach((p: { client_id: string }) => {
@@ -69,51 +74,61 @@ export async function getClient(id: string): Promise<ActionResponse<ClientDetail
     await requireStaff();
 
     const supabase = await createClient();
-    const { data, error } = await supabase
+
+    // The client row and its projects key off the `id` argument, not off
+    // each other, so they are issued together. Previously this was a
+    // three-wave read: client -> projects -> tasks -> tasks again.
+    const clientPromise = supabase
       .from("clients")
       .select("*")
       .eq("id", id)
       .single();
 
-    if (error || !data) {
-      return { success: false, error: "Client not found" };
-    }
-
-    const { data: projects } = await supabase
+    const projectsPromise = supabase
       .from("projects")
       .select("id, name, status")
       .eq("client_id", id)
       .neq("status", "ARCHIVED")
       .order("created_at", { ascending: false });
 
-    // Active task counts per project
-    const projectIds = (projects ?? []).map((p: { id: string }) => p.id);
-    const counts = new Map<string, number>();
-    if (projectIds.length > 0) {
-      const { data: tasks } = await supabase
-        .from("tasks")
-        .select("project_id")
-        .in("project_id", projectIds)
-        .not("status", "in", '("COMPLETED")');
-      (tasks ?? []).forEach((t: { project_id: string }) => {
-        counts.set(t.project_id, (counts.get(t.project_id) ?? 0) + 1);
-      });
+    const [{ data, error }, { data: projects }] = await Promise.all([
+      clientPromise,
+      projectsPromise,
+    ]);
+
+    if (error || !data) {
+      return { success: false, error: "Client not found" };
     }
 
-    // §17 — task stats across the client's projects (same RLS scope)
+    // One task read feeds both outputs. The per-project active counts
+    // used to be a separate query selecting only `project_id`; the
+    // stats query below selects status and deadline for the same rows,
+    // so it is a strict superset and the extra round-trip bought
+    // nothing.
+    const projectIds = (projects ?? []).map((p: { id: string }) => p.id);
+    const counts = new Map<string, number>();
     const taskStats = { active: 0, completed: 0, overdue: 0 };
+
     if (projectIds.length > 0) {
       const { data: statTasks } = await supabase
         .from("tasks")
         .select("status, deadline, project_id")
         .in("project_id", projectIds);
+
       const now = Date.now();
-      for (const t of statTasks ?? [] as Array<{ status: string; deadline: string | null }>) {
-        if (t.status === "COMPLETED") taskStats.completed += 1;
-        else {
-          taskStats.active += 1;
-          if (t.deadline && new Date(t.deadline).getTime() < now) taskStats.overdue += 1;
+      for (const t of (statTasks ?? []) as Array<{
+        status: string;
+        deadline: string | null;
+        project_id: string;
+      }>) {
+        if (t.status === "COMPLETED") {
+          taskStats.completed += 1;
+          continue;
         }
+        // Active per project (§17 counts) and overall task_stats.
+        counts.set(t.project_id, (counts.get(t.project_id) ?? 0) + 1);
+        taskStats.active += 1;
+        if (t.deadline && new Date(t.deadline).getTime() < now) taskStats.overdue += 1;
       }
     }
 
