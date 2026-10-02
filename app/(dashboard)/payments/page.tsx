@@ -13,7 +13,7 @@ export default async function PaymentsPage() {
   if (!profile) redirect("/login");
   if (profile.status !== "ACTIVE" || !profile.role) redirect("/pending");
 
-  if (profile.role === "ADMIN") {
+  if (profile.role === "SUPER_ADMIN") {
     return <AdminPaymentsView />;
   }
   return <EmployeePaymentsView />;

@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireActiveAdmin, requireAuth } from "@/lib/auth";
+import { requireStaff, requireAuth } from "@/lib/auth";
 import type { ActionResponse } from "@/types/database";
 
 // ──────────────────────────────────────────────
@@ -53,7 +53,7 @@ export async function getAdminDashboard(): Promise<
     // returned — an unauthorized caller gets the same "Failed to load
     // dashboard" as before. This collapses two sequential round-trips
     // (auth ≈ 0.5s, then queries) into the time of the slowest query.
-    const authPromise = requireActiveAdmin().then(
+    const authPromise = requireStaff().then(
       () => true,
       () => false
     );
@@ -484,11 +484,11 @@ export async function globalSearch(query: string): Promise<ActionResponse<Search
     const [tasksRes, projectsRes, clientsRes, employeesRes] = await Promise.all([
       taskQuery,
       projectQuery,
-      profile.role === "ADMIN"
+      profile.role === "SUPER_ADMIN"
         ? supabase.from("clients").select("id, name").ilike("name", like).limit(4)
         : Promise.resolve({ data: [] as { id: string; name: string }[] }),
       // Employees are only searchable by admins (RLS matches this)
-      profile.role === "ADMIN"
+      profile.role === "SUPER_ADMIN"
         ? supabase
             .from("profiles")
             .select("id, full_name, email")

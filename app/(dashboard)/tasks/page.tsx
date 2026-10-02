@@ -148,7 +148,7 @@ export default function TasksPage() {
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const { userId: currentUserId, role: userRole } = useSession();
-  const isAdmin = userRole === "ADMIN";
+  const isAdmin = userRole === "SUPER_ADMIN";
 
   // Cached queries — revisiting this page reads from cache, it does not
   // refetch while data is fresh (§3). Realtime keeps it live (§5).

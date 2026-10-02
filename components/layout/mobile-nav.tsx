@@ -22,7 +22,7 @@ export function MobileNav({ role }: { role: UserRole }) {
   }
 
   // Admin gets Home/Tasks/Projects + More; employee gets 4 direct items
-  const isAdmin = role === "ADMIN";
+  const isAdmin = role === "SUPER_ADMIN";
 
   return (
     <>

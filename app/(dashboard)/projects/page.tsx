@@ -33,7 +33,7 @@ type ProjectsTab = "active" | "archived";
 export default function ProjectsPage() {
   const queryClient = useQueryClient();
   const { role } = useSession();
-  const isAdmin = role === "ADMIN";
+  const isAdmin = role === "SUPER_ADMIN";
   const [tab, setTab] = useState<ProjectsTab>("active");
   const [confirmDelete, setConfirmDelete] = useState<(typeof projects)[number] | null>(null);
   const [deleting, setDeleting] = useState(false);

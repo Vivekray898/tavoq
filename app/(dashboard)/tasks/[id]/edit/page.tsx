@@ -12,7 +12,7 @@ export default async function EditTaskPage({
 }) {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "ADMIN") redirect("/tasks");
+  if (profile.role !== "SUPER_ADMIN") redirect("/tasks");
 
   const { id } = await params;
   const result = await getTask(id);

@@ -6,7 +6,7 @@ import { ClientForm } from "@/components/clients/client-form";
 export default async function NewClientPage() {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "ADMIN") redirect("/projects");
+  if (profile.role !== "SUPER_ADMIN") redirect("/projects");
 
   return (
     <div className="space-y-6">

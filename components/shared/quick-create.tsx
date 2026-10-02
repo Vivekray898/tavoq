@@ -22,7 +22,7 @@ export function QuickCreate() {
   const router = useRouter();
   const { role } = useSession();
   const [open, setOpen] = useState(false);
-  const isAdmin = role === "ADMIN";
+  const isAdmin = role === "SUPER_ADMIN";
 
   if (!isAdmin) return null;
 
@@ -70,7 +70,7 @@ export function QuickCreate() {
 export function MobileQuickCreate() {
   const { role } = useSession();
   const pathname = usePathname();
-  const isAdmin = role === "ADMIN";
+  const isAdmin = role === "SUPER_ADMIN";
   if (!isAdmin) return null;
 
   // Task detail / project detail render their own sticky bottom bars.

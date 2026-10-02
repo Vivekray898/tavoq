@@ -46,7 +46,7 @@ export async function GET(request: Request) {
         if (profile.status === "SUSPENDED") {
           return NextResponse.redirect(`${origin}/suspended`);
         }
-        if (profile.role === "ADMIN") {
+        if (profile.role === "SUPER_ADMIN") {
           return NextResponse.redirect(`${origin}/admin`);
         }
         return NextResponse.redirect(`${origin}/`);

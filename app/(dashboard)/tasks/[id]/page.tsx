@@ -79,7 +79,7 @@ export default function TaskDetailPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { userId: currentUserId, role } = useSession();
-  const userRole = role === "ADMIN" ? "ADMIN" : "EMPLOYEE";
+  const userRole = role === "SUPER_ADMIN" ? "SUPER_ADMIN" : "EMPLOYEE";
 
   // Cached detail — returning to a visited task reads cache instantly (§3).
   const taskQuery = useQuery(taskDetailOptions(taskId));
@@ -222,7 +222,7 @@ export default function TaskDetailPage() {
   }
 
   const isAssignee = task.assigned_to === currentUserId;
-  const isAdmin = userRole === "ADMIN";
+  const isAdmin = userRole === "SUPER_ADMIN";
 
   // Primary action logic (§12)
   let primaryAction: {

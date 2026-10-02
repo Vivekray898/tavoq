@@ -72,7 +72,7 @@ export default function ProjectDetailPage() {
   const queryClient = useQueryClient();
   const projectId = params.id as string;
   const { role } = useSession();
-  const isAdmin = role === "ADMIN";
+  const isAdmin = role === "SUPER_ADMIN";
 
   // Cached detail — revisiting a project reads cache instantly (§3).
   const projectQuery = useQuery(projectDetailOptions(projectId));

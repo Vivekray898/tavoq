@@ -108,9 +108,13 @@ export const EMPLOYEE_MORE_ITEMS: NavItem[] = [
 
 export function getNavForRole(role: UserRole) {
   return {
-    desktop: role === "ADMIN" ? ADMIN_NAV : EMPLOYEE_NAV,
-    mobile: role === "ADMIN" ? ADMIN_MOBILE_NAV : EMPLOYEE_MOBILE_NAV,
-    more: role === "ADMIN" ? ADMIN_MORE_ITEMS : EMPLOYEE_MORE_ITEMS,
+    // Phase 1 keeps navigation exactly as it was: super admin sees the
+    // admin nav, everyone else sees the employee nav. Manager entries
+    // are added in the UI phase — RLS and the actions already scope a
+    // manager correctly, so nothing here is a security boundary.
+    desktop: role === "SUPER_ADMIN" ? ADMIN_NAV : EMPLOYEE_NAV,
+    mobile: role === "SUPER_ADMIN" ? ADMIN_MOBILE_NAV : EMPLOYEE_MOBILE_NAV,
+    more: role === "SUPER_ADMIN" ? ADMIN_MORE_ITEMS : EMPLOYEE_MORE_ITEMS,
   };
 }
 

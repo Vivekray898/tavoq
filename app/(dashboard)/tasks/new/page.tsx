@@ -6,7 +6,7 @@ import { TaskForm } from "@/components/tasks/task-form";
 export default async function NewTaskPage() {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "ADMIN") redirect("/tasks");
+  if (profile.role !== "SUPER_ADMIN") redirect("/tasks");
 
   return (
     <div className="space-y-6">

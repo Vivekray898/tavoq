@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAdmin } from "@/lib/auth";
+import { requireStaff, requireSuperAdmin } from "@/lib/auth";
 import { clientSchema, type ClientInput } from "@/validators/schemas";
 import type { ActionResponse, Client } from "@/types/database";
 
@@ -11,7 +11,7 @@ export async function getClients(
   ActionResponse<Array<Client & { projects_count: number }>>
 > {
   try {
-    await requireAdmin();
+    await requireStaff();
 
     const supabase = await createClient();
     // §43 — Active and Archived are separate views
@@ -66,7 +66,7 @@ export interface ClientDetail extends Client {
 
 export async function getClient(id: string): Promise<ActionResponse<ClientDetail>> {
   try {
-    await requireAdmin();
+    await requireStaff();
 
     const supabase = await createClient();
     const { data, error } = await supabase
@@ -137,7 +137,7 @@ export async function createClientAction(
   input: ClientInput
 ): Promise<ActionResponse<Client>> {
   try {
-    await requireAdmin();
+    await requireStaff();
 
     const validated = clientSchema.safeParse(input);
     if (!validated.success) {
@@ -175,7 +175,7 @@ export async function updateClientAction(
   input: ClientInput
 ): Promise<ActionResponse<Client>> {
   try {
-    await requireAdmin();
+    await requireStaff();
 
     const validated = clientSchema.safeParse(input);
     if (!validated.success) {
@@ -212,7 +212,7 @@ export async function updateClientAction(
 /** Archive instead of delete (§56) — keeps history intact */
 export async function archiveClientAction(id: string): Promise<ActionResponse> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
     const supabase = await createClient();
     const { error } = await supabase
       .from("clients")
@@ -237,7 +237,7 @@ export async function archiveClientAction(id: string): Promise<ActionResponse> {
 /** §47 — restore returns the client to the active list */
 export async function restoreClientAction(id: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
     const { error } = await supabase
       .from("clients")
@@ -256,7 +256,8 @@ export async function restoreClientAction(id: string): Promise<ActionResponse> {
 /** Permanent delete — only when the client has no projects left */
 export async function deleteClientAction(id: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    // Hard delete is super-admin only (matrix: managers cannot delete clients).
+    await requireSuperAdmin();
     const supabase = await createClient();
 
     const { count: projectCount } = await supabase
@@ -288,7 +289,7 @@ export async function deleteClientAction(id: string): Promise<ActionResponse> {
 /** Used by project/task forms */
 export async function getActiveClients(): Promise<ActionResponse<Client[]>> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
     const { data, error } = await supabase
       .from("clients")

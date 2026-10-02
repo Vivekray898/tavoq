@@ -1,7 +1,14 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAdmin, requireAuth, hasProjectAccess } from "@/lib/auth";
+import {
+  getMemberProjectIds,
+  hasProjectAccess,
+  requireAuth,
+  requireStaff,
+  requireSuperAdmin,
+} from "@/lib/auth";
+import { canManageProject as canManageProjectRule } from "@/lib/permissions";
 import { taskSchema, type TaskInput } from "@/validators/schemas";
 import {
   createNotification,
@@ -335,7 +342,16 @@ export async function createTaskAction(
   input: TaskInput
 ): Promise<ActionResponse<Task>> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
+
+    // Managers may only create tasks inside their own projects.
+    // Super admins skip the membership lookup entirely.
+    if (profile.role === "MANAGER") {
+      const memberProjectIds = await getMemberProjectIds(profile.id);
+      if (!canManageProjectRule(profile.role, input.project_id, memberProjectIds)) {
+        return { success: false, error: "You can only create tasks in your own projects" };
+      }
+    }
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
@@ -470,7 +486,29 @@ export async function updateTaskAction(
   input: TaskInput
 ): Promise<ActionResponse<Task>> {
   try {
-    await requireAdmin();
+    const profile = await requireStaff();
+
+    // Scope by the task's CURRENT project, not the submitted one —
+    // otherwise a manager could move a task out of someone else's
+    // project by submitting their own project_id.
+    if (profile.role === "MANAGER") {
+      const supabase = await createClient();
+      const { data: existing } = await supabase
+        .from("tasks")
+        .select("project_id")
+        .eq("id", id)
+        .single();
+      if (!existing) return { success: false, error: "Task not found" };
+
+      const memberProjectIds = await getMemberProjectIds(profile.id);
+      if (!canManageProjectRule(profile.role, existing.project_id, memberProjectIds)) {
+        return { success: false, error: "You can only update tasks in your own projects" };
+      }
+      // Moving a task into another project would sidestep the check above.
+      if (input.project_id && !canManageProjectRule(profile.role, input.project_id, memberProjectIds)) {
+        return { success: false, error: "You cannot move a task into another team's project" };
+      }
+    }
 
     const validated = taskSchema.safeParse(input);
     if (!validated.success) {
@@ -564,7 +602,9 @@ export async function updateTaskAction(
 
 export async function deleteTaskAction(id: string): Promise<ActionResponse> {
   try {
-    const profile = await requireAdmin();
+    // Hard delete is super-admin only (matrix: managers cannot delete
+    // tasks). archive/status transitions remain manager-permitted.
+    const profile = await requireSuperAdmin();
     const supabase = await createClient();
 
     const [{ data: task }, { data: payment }, { data: attachments }] =
@@ -640,7 +680,7 @@ export async function updateTaskStatus(
 
     const { data: currentTask } = await supabase
       .from("tasks")
-      .select("id, title, status, assigned_to")
+      .select("id, title, status, assigned_to, project_id")
       .eq("id", taskId)
       .single();
 
@@ -648,12 +688,18 @@ export async function updateTaskStatus(
       return { success: false, error: "Task not found" };
     }
 
-    // Authorization only — admins may move any task, employees only
-    // their own. Which status they're allowed to move it to is
-    // unrestricted.
-    const isAdmin = profile.role === "ADMIN";
+    // Authorization only — super admins may move any task, managers
+    // any task in their own projects, employees only their own.
+    // Which status they're allowed to move it to is unrestricted.
+    const isAdmin = profile.role === "SUPER_ADMIN";
     const isAssignee = currentTask.assigned_to === profile.id;
-    if (!isAdmin && !isAssignee) {
+
+    let canMove = isAdmin || isAssignee;
+    if (!canMove && profile.role === "MANAGER") {
+      const memberProjectIds = await getMemberProjectIds(profile.id);
+      canMove = canManageProjectRule(profile.role, currentTask.project_id, memberProjectIds);
+    }
+    if (!canMove) {
       return { success: false, error: "You can only update your own tasks" };
     }
 
@@ -667,8 +713,8 @@ export async function updateTaskStatus(
     if (status === "COMPLETED") {
       // Mark payable on completion if it has a payout and is not yet paid.
       // payment_status is a protected column: the DB trigger rejects it
-      // from anyone who isn't an admin, so only admins may set it here.
-      // Employees completing their own task rely on the
+      // from anyone who isn't an admin, so only super admins may set it
+      // here. Staff and employees completing a task rely on the
       // create_payment_on_task_completion trigger instead (migration 010).
       if (isAdmin) {
         const { data: pay } = await supabase
@@ -903,7 +949,7 @@ export async function deleteTaskAttachment(
       .single();
     if (!att) return { success: false, error: "Attachment not found" };
 
-    if (profile.role !== "ADMIN" && att.uploaded_by !== profile.id) {
+    if (profile.role !== "SUPER_ADMIN" && att.uploaded_by !== profile.id) {
       return { success: false, error: "You can only delete your own files" };
     }
 
@@ -981,7 +1027,7 @@ export async function getProjectsForTask(): Promise<
 }
 
 // ────────────────────────────────────────────
-// Bulk actions (admin) — one server round-trip
+// Bulk actions (staff) — one server round-trip
 // per field change instead of N single edits.
 // Same authorization as single-task actions.
 // ────────────────────────────────────────────
@@ -996,11 +1042,32 @@ export async function bulkUpdateTasks(
   }
 ): Promise<ActionResponse<{ updated: number }>> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
     const supabase = await createClient();
 
     if (taskIds.length === 0) return { success: false, error: "No tasks selected" };
     if (taskIds.length > 50) return { success: false, error: "Select at most 50 tasks" };
+
+    // A manager may only bulk-edit tasks inside their own projects.
+    // Checked as a set before any write so a mixed selection is
+    // rejected wholesale rather than partially applied.
+    if (profile.role === "MANAGER") {
+      const memberProjectIds = await getMemberProjectIds(profile.id);
+      const { data: selected } = await supabase
+        .from("tasks")
+        .select("project_id")
+        .in("id", taskIds);
+
+      const allMine = (selected ?? []).every((t) =>
+        canManageProjectRule(profile.role, t.project_id, memberProjectIds)
+      );
+      if (!allMine || (selected ?? []).length !== taskIds.length) {
+        return {
+          success: false,
+          error: "You can only update tasks in your own projects",
+        };
+      }
+    }
 
     const update: Record<string, unknown> = {};
 

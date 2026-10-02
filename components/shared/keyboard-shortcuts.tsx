@@ -77,7 +77,7 @@ export function KeyboardShortcuts() {
         return;
       }
 
-      if (e.key.toLowerCase() === "n" && role === "ADMIN") {
+      if (e.key.toLowerCase() === "n" && role === "SUPER_ADMIN") {
         e.preventDefault();
         router.push("/tasks/new");
         return;

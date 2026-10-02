@@ -4,7 +4,7 @@ import { requireAuth } from "@/lib/auth";
 
 export default async function AdminPage() {
   const profile = await requireAuth();
-  if (profile.role !== "ADMIN") redirect("/employee");
+  if (profile.role !== "SUPER_ADMIN") redirect("/employee");
 
   return <AdminDashboard firstName={profile.full_name.split(" ")[0]} />;
 }

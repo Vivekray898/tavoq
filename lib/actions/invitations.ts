@@ -2,7 +2,8 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { requireActiveAdmin } from "@/lib/auth";
+import { requireStaff } from "@/lib/auth";
+import { invitableRoles } from "@/lib/permissions";
 import { invitationSchema, type InvitationInput } from "@/validators/schemas";
 import { sendInvitationEmail } from "@/lib/email";
 import type { ActionResponse, UserRole } from "@/types/database";
@@ -57,7 +58,7 @@ export async function notifyAdminsOfPendingAccount(): Promise<void> {
     const { data: admins } = await admin
       .from("profiles")
       .select("id")
-      .eq("role", "ADMIN")
+      .eq("role", "SUPER_ADMIN")
       .eq("status", "ACTIVE");
 
     if (!admins || admins.length === 0) return;
@@ -80,7 +81,7 @@ export async function notifyAdminsOfPendingAccount(): Promise<void> {
 
 export async function getInvitations(): Promise<ActionResponse<Invitation[]>> {
   try {
-    await requireActiveAdmin();
+    await requireStaff();
     const supabase = await createClient();
 
     const { data, error } = await supabase
@@ -108,7 +109,7 @@ export async function inviteEmployeeAction(
   input: InvitationInput
 ): Promise<ActionResponse<{ id: string; email: string }>> {
   try {
-    const profile = await requireActiveAdmin();
+    const profile = await requireStaff();
     const validated = invitationSchema.safeParse(input);
     if (!validated.success) {
       return {
@@ -118,6 +119,17 @@ export async function inviteEmployeeAction(
     }
 
     const email = validated.data.email.toLowerCase().trim();
+
+    // A manager may only onboard EMPLOYEE accounts — they cannot mint
+    // a peer manager or a super admin. Enforced here so the refusal is
+    // a clean ActionResponse.error rather than an RLS rejection.
+    if (!invitableRoles(profile.role).includes(validated.data.role)) {
+      return {
+        success: false,
+        error: "You can only invite employees",
+      };
+    }
+
     const admin = createAdminClient();
 
     // An active account already exists for this email?
@@ -178,7 +190,7 @@ export async function inviteEmployeeAction(
 
 export async function revokeInvitation(id: string): Promise<ActionResponse> {
   try {
-    await requireActiveAdmin();
+    await requireStaff();
     const admin = createAdminClient();
 
     const { error } = await admin

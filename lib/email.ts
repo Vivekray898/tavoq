@@ -1,4 +1,5 @@
 import { Resend } from "resend";
+import type { UserRole } from "@/types/database";
 
 const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "Taskora <noreply@taskora.app>";
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
@@ -98,11 +99,16 @@ function baseTemplate(title: string, content: string): string {
 export async function sendInvitationEmail(
   to: string,
   invitedByName: string,
-  role: "ADMIN" | "EMPLOYEE",
+  role: UserRole,
   inviteUrl: string
 ) {
   const safeInviter = escapeHtml(invitedByName);
-  const roleLabel = role === "ADMIN" ? "an administrator" : "a team member";
+  const roleLabel =
+    role === "SUPER_ADMIN"
+      ? "a super admin"
+      : role === "MANAGER"
+        ? "a manager"
+        : "a team member";
 
   const content = `
     <p>Hi,</p>

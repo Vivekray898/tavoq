@@ -9,10 +9,11 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
+import type { UserRole } from "@/types/database";
 interface AcceptInvitationProps {
   token: string;
   email: string;
-  role: "ADMIN" | "EMPLOYEE";
+  role: UserRole;
   invitedByName: string | null;
   signedIn: boolean;
 }
@@ -81,7 +82,11 @@ export function AcceptInvitation({
             ? `${invitedByName} invited you to join as `
             : "You've been invited to join as "}
           <span className="font-medium text-foreground">
-            {role === "ADMIN" ? "an administrator" : "a team member"}
+            {role === "SUPER_ADMIN"
+              ? "a super admin"
+              : role === "MANAGER"
+                ? "a manager"
+                : "a team member"}
           </span>
           .
         </p>

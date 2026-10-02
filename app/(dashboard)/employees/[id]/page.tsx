@@ -9,7 +9,7 @@ export default async function EmployeeProfilePage({
 }) {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "ADMIN") redirect("/tasks");
+  if (profile.role !== "SUPER_ADMIN") redirect("/tasks");
 
   const { id } = await params;
   return <EmployeeProfile employeeId={id} />;

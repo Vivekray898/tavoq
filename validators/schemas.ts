@@ -6,7 +6,7 @@ import { z } from "zod";
 
 export const invitationSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
-  role: z.enum(["EMPLOYEE", "ADMIN"]).default("EMPLOYEE"),
+  role: z.enum(["SUPER_ADMIN", "MANAGER", "EMPLOYEE"]).default("EMPLOYEE"),
 });
 
 export type InvitationInput = z.infer<typeof invitationSchema>;

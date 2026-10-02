@@ -2,7 +2,14 @@
 // Enums
 // ──────────────────────────────────────────────
 
-export type UserRole = "ADMIN" | "EMPLOYEE";
+/**
+ * Three-role model (migration 013).
+ *
+ * The former `ADMIN` value was migrated to `SUPER_ADMIN` in place and is
+ * intentionally absent here: if it still appears in this union, code can
+ * be written that type-checks but can never match at runtime.
+ */
+export type UserRole = "SUPER_ADMIN" | "MANAGER" | "EMPLOYEE";
 export type ProfileStatus = "PENDING" | "ACTIVE" | "SUSPENDED";
 
 export type ProjectStatus =

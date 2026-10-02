@@ -5,7 +5,7 @@ import { ClientsList } from "@/components/clients/clients-list";
 export default async function ClientsPage() {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "ADMIN") redirect("/projects");
+  if (profile.role !== "SUPER_ADMIN") redirect("/projects");
 
   return <ClientsList />;
 }

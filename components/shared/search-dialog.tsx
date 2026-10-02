@@ -41,7 +41,7 @@ interface Hit {
 export function SearchDialog({ open, onOpenChange }: SearchDialogProps) {
   const router = useRouter();
   const { role } = useSession();
-  const isAdmin = role === "ADMIN";
+  const isAdmin = role === "SUPER_ADMIN";
 
   const [query, setQuery] = useState("");
   const [server, setServer] = useState<SearchResult | null>(null);

@@ -15,7 +15,7 @@ export default async function DashboardPage() {
     redirect(profile.status === "SUSPENDED" ? "/suspended" : "/pending");
   }
 
-  if (profile.role === "ADMIN") {
+  if (profile.role === "SUPER_ADMIN") {
     return <AdminDashboard firstName={profile.full_name.split(" ")[0]} />;
   }
 

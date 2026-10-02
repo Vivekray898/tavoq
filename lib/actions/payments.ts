@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAdmin, requireAuth } from "@/lib/auth";
+import { requireStaff, requireAuth } from "@/lib/auth";
 import { sendEventEmail } from "@/lib/notifications";
 import type { ActionResponse } from "@/types/database";
 
@@ -87,7 +87,7 @@ function one<T>(embedded: T[] | T | null | undefined): T | null {
  */
 export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorkspaceData>> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
 
     const now = new Date();
@@ -259,7 +259,7 @@ export async function getEmployeePayableTasks(
   employeeId: string
 ): Promise<ActionResponse<PayableTask[]>> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
 
     const [tasksRes, paymentsRes] = await Promise.all([
@@ -337,7 +337,7 @@ export async function createPaymentFromTasks(
   }>
 > {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
     if (!employeeId) return { success: false, error: "Select an employee first" };
     if (!items || items.length === 0) {
       return { success: false, error: "Select at least one task" };
@@ -469,7 +469,7 @@ export async function createCustomPayment(
   paymentNote?: string
 ): Promise<ActionResponse<PaymentItem>> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
     if (!employeeId) return { success: false, error: "Select an employee" };
     if (!(amount > 0)) return { success: false, error: "Amount must be greater than zero" };
     if (!description.trim()) {
@@ -543,7 +543,7 @@ export async function markPaymentPaid(
   paymentNote?: string
 ): Promise<ActionResponse<PaymentItem>> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
     const supabase = await createClient();
 
     const { data: row, error } = await supabase
@@ -795,7 +795,7 @@ export async function markPaymentsPaidBatch(
   }>
 > {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
     const supabase = await createClient();
 
     if (paymentIds.length === 0) return { success: false, error: "No payments selected" };
@@ -907,7 +907,7 @@ export async function updatePaymentNote(
   note: string
 ): Promise<ActionResponse<{ payment_note: string | null }>> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
 
     const trimmed = note.trim();

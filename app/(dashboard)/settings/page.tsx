@@ -5,7 +5,7 @@ import { SettingsForm } from "@/components/settings/settings-form";
 export default async function SettingsPage() {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "ADMIN") redirect("/profile");
+  if (profile.role !== "SUPER_ADMIN") redirect("/profile");
 
   return <SettingsForm />;
 }

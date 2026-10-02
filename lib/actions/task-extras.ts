@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAuth, requireAdmin } from "@/lib/auth";
+import { requireAuth, requireStaff } from "@/lib/auth";
 import { labelSchema, subtaskSchema, type LabelInput, type SubtaskInput } from "@/validators/schemas";
 import type { ActionResponse, Label, TaskSubtask } from "@/types/database";
 
@@ -30,7 +30,7 @@ export async function getLabels(): Promise<ActionResponse<Label[]>> {
 
 export async function createLabelAction(input: LabelInput): Promise<ActionResponse<Label>> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const validated = labelSchema.safeParse(input);
     if (!validated.success) {
       return { success: false, error: validated.error.issues[0]?.message ?? "Invalid label" };
@@ -59,7 +59,7 @@ export async function createLabelAction(input: LabelInput): Promise<ActionRespon
 
 export async function deleteLabelAction(labelId: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
     const { error } = await supabase.from("labels").delete().eq("id", labelId);
     if (error) {
@@ -186,7 +186,7 @@ export async function addSubtask(
     }
 
     const supabase = await createClient();
-    if (!(await canAccessTask(supabase, taskId, profile.id, profile.role === "ADMIN"))) {
+    if (!(await canAccessTask(supabase, taskId, profile.id, profile.role === "SUPER_ADMIN"))) {
       return { success: false, error: "You don't have access to this task" };
     }
 

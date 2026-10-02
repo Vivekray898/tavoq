@@ -6,7 +6,7 @@ import { ProjectForm } from "@/components/projects/project-form";
 export default async function NewProjectPage() {
   const profile = await getUserProfile();
   if (!profile) redirect("/login");
-  if (profile.role !== "ADMIN") redirect("/projects");
+  if (profile.role !== "SUPER_ADMIN") redirect("/projects");
 
   return (
     <div className="space-y-6">

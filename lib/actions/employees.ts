@@ -1,7 +1,8 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAdmin, requireActiveUser } from "@/lib/auth";
+import { requireStaff, requireActiveUser } from "@/lib/auth";
+import { canManageProfile } from "@/lib/permissions";
 import type { ActionResponse, Profile, UserRole } from "@/types/database";
 
 export interface TeamMember extends Profile {
@@ -15,7 +16,7 @@ export interface TeamMember extends Profile {
 
 export async function getTeamMembers(): Promise<ActionResponse<TeamMember[]>> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
     const now = Date.now();
     const [{ data: profiles, error }, { data: tasks }, { data: memberships }, { data: pendingPayments }] =
@@ -72,8 +73,47 @@ export async function manageProfileAction(
   role?: UserRole
 ): Promise<ActionResponse<Profile>> {
   try {
-    await requireAdmin();
+    const actor = await requireStaff();
     const supabase = await createClient();
+
+    // Authorize BEFORE the RPC, against the target's CURRENT role.
+    //
+    // This check is not redundant with manage_profile_lifecycle(): the
+    // RPC is SECURITY DEFINER and the one authoritative gate, but it
+    // only sees the row it is about to write. Checking here too means
+    // an unauthorized attempt returns a normal ActionResponse.error
+    // (rather than a thrown Postgres error string) and cannot be
+    // reached at all from a manager's client.
+    const { data: target, error: targetError } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", targetId)
+      .maybeSingle();
+
+    if (targetError) {
+      return { success: false, error: "Failed to load team member" };
+    }
+    if (!target) {
+      return { success: false, error: "Team member not found" };
+    }
+
+    if (
+      !canManageProfile(
+        actor.role,
+        (target.role as UserRole | null) ?? null,
+        action,
+        role ?? null
+      )
+    ) {
+      return {
+        success: false,
+        error:
+          action === "ROLE_CHANGED"
+            ? "Only a super admin can change a role"
+            : "You can only manage employees",
+      };
+    }
+
     const { data, error } = await supabase
       .rpc("manage_profile_lifecycle", {
         target_id: targetId,
@@ -110,7 +150,7 @@ export async function getEmployeesWithWorkload(): Promise<
   ActionResponse<EmployeeWithWorkload[]>
 > {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
 
     const { data: employees, error } = await supabase
@@ -229,7 +269,7 @@ export async function getEmployeeProfile(
   id: string
 ): Promise<ActionResponse<EmployeeProfileDetail>> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
 
     const { data: employee, error } = await supabase

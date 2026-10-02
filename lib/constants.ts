@@ -180,7 +180,8 @@ export const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
 // ──────────────────────────────────────────────
 
 export const ROLE_LABELS: Record<UserRole, string> = {
-  ADMIN: "Admin",
+  SUPER_ADMIN: "Super Admin",
+  MANAGER: "Manager",
   EMPLOYEE: "Employee",
 };
 

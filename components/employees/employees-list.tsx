@@ -63,12 +63,12 @@ export function EmployeesList() {
   const [pendingAction, setPendingAction] = useState<{
     member: TeamMember;
     action: TeamAction;
-    role?: "ADMIN" | "EMPLOYEE";
+    role?: "SUPER_ADMIN" | "EMPLOYEE";
   } | null>(null);
   const [working, setWorking] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<"EMPLOYEE" | "ADMIN">("EMPLOYEE");
+  const [inviteRole, setInviteRole] = useState<"EMPLOYEE" | "SUPER_ADMIN">("EMPLOYEE");
   const [inviting, setInviting] = useState(false);
   const [lastInviteUrl, setLastInviteUrl] = useState<string | null>(null);
 
@@ -153,7 +153,7 @@ export function EmployeesList() {
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{invitation.email}</p>
                     <p className="text-[11px] text-muted-foreground">
-                      {invitation.role === "ADMIN" ? "Admin" : "Employee"} · sent {formatDate(invitation.created_at)} · expires {formatDate(invitation.expires_at)}
+                      {invitation.role === "SUPER_ADMIN" ? "Admin" : "Employee"} · sent {formatDate(invitation.created_at)} · expires {formatDate(invitation.expires_at)}
                     </p>
                   </div>
                   <Button
@@ -304,7 +304,7 @@ export function EmployeesList() {
                     <Button type="button" size="sm" onClick={() => setPendingAction({ member, action: "APPROVE" })}>
                       <Check className="size-3.5" /> Approve
                     </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "APPROVE", role: "ADMIN" })}>
+                    <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "APPROVE", role: "SUPER_ADMIN" })}>
                       Approve as admin
                     </Button>
                     <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "REJECT" })}>
@@ -315,8 +315,8 @@ export function EmployeesList() {
                 {member.status === "ACTIVE" && (
                   <>
                     <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "SUSPEND" })}>Suspend</Button>
-                    <Button type="button" variant="ghost" size="sm" onClick={() => setPendingAction({ member, action: "ROLE_CHANGED", role: member.role === "ADMIN" ? "EMPLOYEE" : "ADMIN" })}>
-                      Make {member.role === "ADMIN" ? "employee" : "admin"}
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setPendingAction({ member, action: "ROLE_CHANGED", role: member.role === "SUPER_ADMIN" ? "EMPLOYEE" : "SUPER_ADMIN" })}>
+                      Make {member.role === "SUPER_ADMIN" ? "employee" : "admin"}
                     </Button>
                   </>
                 )}
@@ -419,13 +419,13 @@ export function EmployeesList() {
               </div>
               <div className="space-y-1.5">
                 <label className="text-sm font-medium">Role</label>
-                <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as "EMPLOYEE" | "ADMIN")}>
+                <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as "EMPLOYEE" | "SUPER_ADMIN")}>
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="EMPLOYEE">Employee</SelectItem>
-                    <SelectItem value="ADMIN">Admin</SelectItem>
+                    <SelectItem value="SUPER_ADMIN">Admin</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

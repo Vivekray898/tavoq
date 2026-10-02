@@ -1,7 +1,13 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireAdmin, requireAuth, hasProjectAccess } from "@/lib/auth";
+import {
+  assertCanManageProject,
+  hasProjectAccess,
+  requireAuth,
+  requireStaff,
+  requireSuperAdmin,
+} from "@/lib/auth";
 import { projectSchema, projectResourceSchema, type ProjectInput, type ProjectResourceInput } from "@/validators/schemas";
 import type {
   ActionResponse,
@@ -113,7 +119,7 @@ export async function getProject(id: string): Promise<ActionResponse<ProjectDeta
     const profile = await requireAuth();
     const supabase = await createClient();
 
-    if (profile.role !== "ADMIN") {
+    if (profile.role !== "SUPER_ADMIN") {
       const hasAccess = await hasProjectAccess(id, profile.id, profile.role);
       if (!hasAccess) {
         return { success: false, error: "You don't have access to this project" };
@@ -212,7 +218,7 @@ export async function createProjectAction(
   input: ProjectInput & { member_ids?: string[] }
 ): Promise<ActionResponse<Project>> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
 
     const validated = projectSchema.safeParse(input);
     if (!validated.success) {
@@ -264,7 +270,9 @@ export async function updateProjectAction(
   input: ProjectInput
 ): Promise<ActionResponse<Project>> {
   try {
-    await requireAdmin();
+    await requireStaff();
+    // Managers may only edit projects they belong to.
+    await assertCanManageProject(id);
 
     const validated = projectSchema.safeParse(input);
     if (!validated.success) {
@@ -300,7 +308,9 @@ export async function updateProjectAction(
 /** Archive instead of delete (§56) */
 export async function archiveProjectAction(id: string): Promise<ActionResponse> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
+    // Managers may only archive projects they belong to.
+    await assertCanManageProject(id);
     const supabase = await createClient();
     const { error } = await supabase
       .from("projects")
@@ -325,7 +335,9 @@ export async function archiveProjectAction(id: string): Promise<ActionResponse> 
 /** §47 — restore brings the project back to ACTIVE */
 export async function restoreProjectAction(id: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    await requireStaff();
+    // Managers may only restore projects they belong to.
+    await assertCanManageProject(id);
     const supabase = await createClient();
     const { error } = await supabase
       .from("projects")
@@ -347,7 +359,8 @@ export async function restoreProjectAction(id: string): Promise<ActionResponse> 
  */
 export async function deleteProjectAction(id: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    // Hard delete is super-admin only (matrix: managers cannot delete projects).
+    await requireSuperAdmin();
     const supabase = await createClient();
 
     const { count: taskCount } = await supabase
@@ -381,7 +394,9 @@ export async function addProjectMember(
   userId: string
 ): Promise<ActionResponse<ProjectMember>> {
   try {
-    await requireAdmin();
+    await requireStaff();
+    // Managers may only staff their own projects.
+    await assertCanManageProject(projectId);
     const supabase = await createClient();
     const { data, error } = await supabase
       .from("project_members")
@@ -402,7 +417,9 @@ export async function removeProjectMember(
   userId: string
 ): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    await requireStaff();
+    // Managers may only unstaff their own projects.
+    await assertCanManageProject(projectId);
     const supabase = await createClient();
     const { error } = await supabase
       .from("project_members")
@@ -427,7 +444,9 @@ export async function addProjectResource(
   resource: ProjectResourceInput
 ): Promise<ActionResponse<ProjectResource>> {
   try {
-    const profile = await requireAdmin();
+    const profile = await requireStaff();
+    // Managers may only add resources to their own projects.
+    await assertCanManageProject(projectId);
 
     const validated = projectResourceSchema.safeParse(resource);
     if (!validated.success) {
@@ -461,7 +480,7 @@ export async function addProjectResource(
 
 export async function deleteProjectResource(resourceId: string): Promise<ActionResponse> {
   try {
-    await requireAdmin();
+    await requireStaff();
     const supabase = await createClient();
     const { error } = await supabase
       .from("project_resources")
