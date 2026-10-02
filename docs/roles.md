@@ -140,3 +140,54 @@ cannot silently regress.
 
 A down-migration is documented in a comment at the top of each file. Reverting is
 lossy: a `MANAGER` cannot be mapped back to a distinct former role.
+
+## How to add a role-guarded action
+
+Adding an action requires four things. Skipping any of them leaves a gap —
+most often an action that the server allows but the UI hides, or the reverse.
+
+**1. Declare the permission in `lib/permissions.ts`.**
+
+```ts
+export type Permission =
+  // …
+  | "reports.export";        // add it to the union
+```
+
+```ts
+const MATRIX: Record<UserRole, readonly Permission[]> = {
+  SUPER_ADMIN: [/* … */, "reports.export"],
+  MANAGER: [/* … */, "reports.export"],
+  EMPLOYEE: [],
+};
+```
+
+If it must be project-scoped for managers, add it to `PROJECT_SCOPED` too —
+then `can()` requires a `Scope` and fails closed without one.
+
+**2. Guard the action with the right tier.**
+
+```ts
+import { requireStaff, assertCanManageProject } from "@/lib/auth";
+
+// Super-admin only (roles, settings, hard deletes)
+const actor = await requireSuperAdmin();
+
+// Operational — and, if project-scoped, scope it to one project
+await requireStaff();
+await assertCanManageProject(projectId);   // managers only, own projects
+```
+
+**3. Write the RLS policy.** Add a migration. Use `is_active_admin()` for
+super-admin-only surfaces and `is_active_staff()` / `can_manage_project(id)`
+for operational ones. Remember the split convention: if any new enum value is
+added, it must go in its own migration that commits before the one using it
+(`scripts/verify-migration-enum-order.mjs` enforces this).
+
+**4. Hide the control with the same predicate.** The UI must call
+`can(role, "reports.export")` from `useRole()` — never a hardcoded role
+comparison. Add a case to `tests/role-ui.test.ts` asserting the control's
+visibility, which keeps steps 1 and 4 from drifting apart.
+
+> UI hiding is cosmetic. It is never the authorization boundary — steps 2 and 3
+> are. A user who forges a request gets nothing regardless of what the UI draws.

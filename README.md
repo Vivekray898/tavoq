@@ -129,35 +129,94 @@ Open [http://localhost:3000](http://localhost:3000)
 
 ## Account Model & Security
 
-Taskora separates **role** (`ADMIN` / `EMPLOYEE`) from **status**
-(`PENDING` / `ACTIVE` / `SUSPENDED`).
+Taskora separates **role** (`SUPER_ADMIN` / `MANAGER` / `EMPLOYEE`) from
+**status** (`PENDING` / `ACTIVE` / `SUSPENDED`).
 
 - **Every new signup — including Google OAuth — starts as
   `role = NULL, status = PENDING` with no application access.**
-  There is no automatic admin promotion of any kind.
+  There is no automatic promotion of any kind.
 - Pending and suspended users are blocked server-side at three layers:
   the Next.js proxy (`proxy.ts`), every server action
-  (`requireActiveUser/Employee/Admin` in `lib/auth.ts`), and Supabase
-  RLS (migrations 005–008).
-- Only an **active admin** can approve accounts, change roles, or
-  suspend users — and the last active admin cannot be demoted or
-  suspended (enforced by the `manage_profile_lifecycle` RPC).
+  (`requireAuth` / `requireStaff` / `requireSuperAdmin` in `lib/auth.ts`),
+  and Supabase RLS (migrations 005–016).
+- A **manager** runs day-to-day operations but only inside the projects
+  they are a member of (`can_manage_project()`).
+- Only a **super admin** can change roles, reach settings, or hard-delete
+  anything — and the last active super admin cannot be demoted or suspended
+  (enforced by the `manage_profile_lifecycle` RPC).
+- Refused privilege escalations are recorded in `admin_audit_log` with the
+  `ROLE_REQUIRES_SUPER_ADMIN` action.
 
-## Creating the First Admin
+Full matrix: **[docs/roles.md](docs/roles.md)**.
 
-The first admin must be created **explicitly** — never by login order:
+## Roles
+
+| Role | What it can do |
+| --- | --- |
+| **SUPER_ADMIN** | Everything: roles, settings, hard deletes, audit log |
+| **MANAGER** | Day-to-day ops on their own projects; approve/suspend employees; run payroll |
+| **EMPLOYEE** | Their own tasks, comments, submissions and payments |
+
+The matrix is enforced twice — in RLS (the real boundary) and in
+`lib/permissions.ts` (the readable mirror the UI and server actions share).
+See [docs/roles.md](docs/roles.md) for the capability-by-capability table and
+a recipe for adding a role-guarded action.
+
+## Realtime
+
+Changes by any user reach every other open session in about a second,
+without a refresh. A single Supabase Realtime channel patches the TanStack
+Query cache in place — there is **no polling and no `router.refresh()`**.
+Mutations also apply optimistically, rolling back with a toast if the server
+refuses.
+
+Setup and the two-browser QA checklist: **[docs/realtime-qa.md](docs/realtime-qa.md)**.
+
+## Google Calendar
+
+Each person's own Google account receives events for **their own tasks only**
+— no admin-wide fan-out, so connecting more accounts can never duplicate an
+event. Reassigning a task moves the event on the new owner's next sync.
+
+Setup: [docs/google-calendar-setup.md](docs/google-calendar-setup.md).
+Ownership model and edge cases: **[docs/google-calendar.md](docs/google-calendar.md)**.
+
+## Cron
+
+`GET /api/cron/daily-reminders` runs daily at **05:00 UTC** (10:30 IST) and
+sends one reminder per employee per unfinished task due today or overdue. It
+is registered in `vercel.json` and de-duplicated by `daily_reminder_log`, so a
+re-run cannot double-notify.
+
+Called by Vercel with `Authorization: Bearer $CRON_SECRET`. Manual run:
+
+```bash
+curl -i -H "Authorization: Bearer $CRON_SECRET" \
+  https://<your-domain>/api/cron/daily-reminders
+```
+
+Rotating the secret: generate a new value, set `CRON_SECRET` in Vercel
+(Production/Preview/Development), redeploy, and update your shell. No other
+secret is affected.
+
+## Creating the First Super Admin
+
+The first super admin must be created **explicitly** — never by login order:
 
 1. Open the app and sign in once with your Google account
 2. In Supabase (SQL Editor), promote that exact account:
 
 ```sql
 UPDATE profiles
-SET role = 'ADMIN', status = 'ACTIVE', active = true,
+SET role = 'SUPER_ADMIN', status = 'ACTIVE', active = true,
     approved_at = now()
 WHERE email = 'you@youragency.com';
 ```
 
 3. Sign out and back in — you'll land on the admin workspace.
+
+Migrations 013–014 renamed the old `ADMIN` value to `SUPER_ADMIN` in place, so
+existing admins were migrated automatically.
 
 ## Adding Employees (Invitations)
 
@@ -168,8 +227,8 @@ WHERE email = 'you@youragency.com';
    exact email address — the account activates with the invited role
 
 Alternatively, uninvited people can sign in on their own — they'll
-land on the **pending** page until an admin approves them from the
-Team page.
+land on the **pending** page until a manager or super admin approves
+them from the Team page.
 
 ### Legacy email/password users signing in with Google
 
@@ -221,15 +280,18 @@ The mobile app will be built with React Native + Expo. For now, the web app is f
 
 ## Key Features
 
-### Admin
+### Super Admin & Manager
 - Dashboard with stats (active projects, tasks, due today, overdue, payments)
 - Client management (CRUD)
 - Project management with members and resources
 - Task creation with assignment, deadlines, and payouts
 - Task review workflow (approve / request revision)
 - Payment tracking (mark paid)
-- Employee management
+- Employee management — managers see approve/reject, super admins also manage roles
 - Notifications
+
+Managers get the same operational surface scoped to their own projects.
+Role changes, settings, and hard deletes are super-admin only.
 
 ### Employee
 - Personal dashboard (due today, needs review, completed, pending payment)
@@ -242,9 +304,10 @@ The mobile app will be built with React Native + Expo. For now, the web app is f
 
 ### Security
 - Supabase Row Level Security (RLS) on all tables
-- Server-side authorization on all server actions
-- Employees can only see their own tasks and payment info
-- Admin-only access to client/project/task management
+- Server-side authorization on every server action
+- Employees see only their own tasks and payment info
+- Managers are scoped to their projects; role changes and deletes are super-admin only
+- Refused privilege escalations are audited
 
 ## Database Schema
 

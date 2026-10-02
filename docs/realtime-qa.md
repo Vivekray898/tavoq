@@ -71,6 +71,49 @@ navigating to it renders fresh from the (already stale-marked) cache.
 | Updates only after a reload | A refetch is happening but the cache isn't being written, or the component holds local state that ignores the cache |
 | Duplicate rows after an event | The handler prepends without an id check — verify the `some(...)` guard is present |
 
+## What Phase 3 verified, and what it did not
+
+**Verified by execution** (`pnpm test`):
+
+- Exactly one channel per session, torn down on unmount — asserted by
+  counting `.channel(` calls in `tests/e2e/hardening.test.ts`. A deliberate
+  duplicate was injected to confirm the check fails.
+- Every reconnect/realtime invalidation is scoped to active queries; no bare
+  `invalidateQueries()` that would refetch the whole app.
+- `refetchOnWindowFocus: false` and `refetchOnReconnect: true` on the query
+  client; no `refetchInterval` anywhere.
+- Every table the provider subscribes to is named in migration 015 — checked
+  in **both** directions, so neither a missing subscription nor a stray
+  publication can slip through.
+- Optimistic writes snapshot the cache, and every rollback is followed by a
+  `toast.error` within three lines (per-site, not per-file).
+
+**Not verified by execution — do the manual pass:**
+
+- Actual cross-browser delivery within ~1s.
+- Offline/reconnect catch-up.
+- Notification badge increments.
+
+These need two signed-in browser contexts and a real network drop. The
+automated suite deliberately makes no writes to the live database to
+simulate them — an earlier draft inserted probe rows into the project and
+was rewritten as read-only, because writing to a real database to satisfy a
+test is a side effect nobody asked for.
+
+## Caveats discovered in Phase 3
+
+- **A table missing from `pg_publication_tables` fails silently.** No error
+  reaches the application; the subscription simply never fires. If one screen
+  is stale and the others are fine, check the publication first — see the
+  runbook.
+- **`setQueriesData` does not pass the query to its updater.** Patching several
+  differently-scoped caches with one updater (activity feeds key their limit
+  inside the query key) needs `getQueriesData` plus a per-key write. Getting
+  this wrong patches the wrong cache silently.
+- **Realtime payloads carry no embedded data.** A `tasks` INSERT cannot patch
+  a list item, because `project_name` and labels are not in the payload; that
+  one case refetches the active list. Updates and deletes patch fine.
+
 ## Adding a table
 
 1. Add it to `REALTIME_TABLES` in `lib/queries/keys.ts` (this documents

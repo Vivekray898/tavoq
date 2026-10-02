@@ -81,11 +81,66 @@ inbound calendar changes. To force a rebuild after changing connections,
 disconnect and reconnect Google Calendar, which clears the sync cursor
 and triggers a full re-sync.
 
+## Disconnect and reconnect
+
+Disconnecting deletes the `user_google_tokens` row, so the next sync finds no
+token and returns `Connect Google Calendar first` rather than failing. It also
+clears the sync cursor, so reconnecting triggers a **full re-sync** rather than
+an incremental one.
+
+Full sync is idempotent: each task has at most one `google_event_id`, and a
+task with one is updated in place (`PUT`) rather than created again
+(`POST`). So disconnect/reconnect does not produce duplicates.
+
+Migration 016 additionally clears any `google_event_id` whose assignee holds
+no connected calendar, so a stale id cannot make a fresh connection believe
+the event already exists.
+
+## When Google revokes the grant
+
+A user can revoke Taskora's access from their Google account at any time. The
+next call then fails with `401 invalid_grant`.
+
+**What happens today:** `fullSyncForUser()` catches the failure per task and
+pushes the message into `SyncResult.errors`, then continues with the rest of
+the batch — one revoked grant never aborts the whole sync. But
+`components/settings/google-calendar-connect.tsx` only reads `created`,
+`updated` and `removed` from the result, so a sync where every task failed
+still reports "0 added, 0 updated" as a success. **The user is not told their
+grant was revoked.**
+
+The practical fix is to reconnect from **Profile → Google Calendar**. Until
+the UI surfaces `SyncResult.errors`, a repeatedly-empty sync on a previously
+working account is the symptom to watch for.
+
+Surfacing `errors.length` in the toast would be the fix; it is not done, so
+it is recorded here rather than claimed as behavior.
+
+## Rotating `GOOGLE_TOKEN_ENCRYPTION_KEY`
+
+Refresh tokens are encrypted at rest with AES-256-GCM using this key
+(`lib/crypto/google-token.ts`, `v1:<iv>:<tag>:<ciphertext>`).
+
+**Rotating it makes every stored token undecryptable. All users must
+disconnect and reconnect Google Calendar.** There is no re-encryption path,
+because the old key is what encrypted them.
+
+Rotate only if the key leaks, and warn users before you do. Clearing
+`user_google_tokens` gives everyone a clean reconnect prompt rather than a
+silent failure on first sync:
+
+```sql
+DELETE FROM user_google_tokens;
+```
+
 ## Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
-| No events appear | The user has not connected, or `last_synced_at` is set but the cursor is stale — try a full sync |
-| Duplicate events | Stale ids from before migration `016`. Run `supabase db push`, then disconnect/reconnect to force a full re-sync |
+| No events appear | The user has not connected, or the cursor is stale — try a full sync |
+| Duplicate events | Stale ids from before migration 016. Run `supabase db push`, then disconnect/reconnect to force a full re-sync |
 | Event in the wrong calendar | The task was reassigned and the previous owner's event remains. The new owner gets theirs on their next sync |
 | "Connect Google Calendar first" | No `user_google_tokens` row for that user |
+| 401 / `invalid_grant` | The grant was revoked on Google's side — have the user reconnect. Not surfaced in the UI today; see above |
+| One bad task blocks the sync | It shouldn't: per-task errors are collected into `SyncResult.errors` |
+| Sync reports "0 added, 0 updated" but tasks are missing | Check `SyncResult.errors` — the failures are being swallowed |
