@@ -1,117 +1,50 @@
 -- ============================================================
--- Taskora — Migration 013
--- Three-role model: SUPER_ADMIN / MANAGER / EMPLOYEE.
+-- Taskora — Migration 014
+-- Role hierarchy: helpers, RLS, and the profile lifecycle RPC.
+--
+-- Split from the former migration 013 because Postgres will not allow
+-- a newly added enum value to be used in the same transaction that
+-- created it (ERROR 55P04). 013_role_enum_values.sql adds SUPER_ADMIN
+-- and MANAGER and commits; THIS file consumes them.
 --
 -- Idempotent: safe to run repeatedly, and safe on a database where
--- 001–012 have all been applied. Existing admins become SUPER_ADMIN
--- and keep every capability they had. No row is dropped or rewritten
--- beyond that role remap.
+-- 001–013 have all been applied. Existing admins are already
+-- SUPER_ADMIN; nothing is moved or dropped here.
 --
--- Run AFTER 012_google_calendar_integration.sql. Order: 001 → 013.
+-- Run AFTER 013_role_enum_values.sql. Order: 001 → 013 → 014.
+--
+-- Every ADD VALUE this project needs lives in 013. This file only
+-- CONSUMES new enum values, which is why it can reference MANAGER and
+-- ROLE_REQUIRES_SUPER_ADMIN safely.
 --
 -- ────────────────────────────────────────────────────────────
--- DOWN MIGRATION (run manually to revert; not automatic)
+-- DOWN MIGRATION
 --
 --   BEGIN;
---
---   -- Restore the single-admin model.
 --   DROP FUNCTION IF EXISTS public.can_manage_project(UUID);
 --   DROP FUNCTION IF EXISTS public.is_active_staff(UUID);
 --   DROP FUNCTION IF EXISTS public.is_active_manager(UUID);
---
---   ALTER TYPE public.user_role RENAME VALUE 'SUPER_ADMIN' TO 'ADMIN';
---   ALTER TYPE public.user_role RENAME VALUE 'MANAGER' TO 'EMPLOYEE'; -- only valid
---   -- if no MANAGER rows exist; otherwise those rows must be mapped
---   -- to EMPLOYEE first, since Postgres cannot remove an enum value:
---   --   UPDATE profiles SET role = 'EMPLOYEE' WHERE role = 'MANAGER';
---   --   UPDATE invitations SET role = 'EMPLOYEE' WHERE role = 'MANAGER';
---
---   -- Re-create the pre-013 helper and re-apply the policies from
---   -- migration 008 (they are all replaced by this file).
---   -- ...
---
+--   -- Restore is_active_admin() and the pre-014 policies from
+--   -- migration 008; they are replaced here rather than edited.
+--   -- Then re-apply the pre-014 manage_profile_lifecycle() from
+--   -- migration 008 (the version without the manager rules).
 --   COMMIT;
 --
--- NOTE: reverting is lossy by nature — a MANAGER cannot be mapped back
--- to a distinct former role, and roles demoted to EMPLOYEE stay that
--- way. Take a backup before reverting in production.
+-- Reverting the enum itself is separate — see 013. Take a backup:
+-- reverting collapses MANAGER into EMPLOYEE.
 -- ============================================================
 
 -- ──────────────────────────────────────────────
--- 1. Extend the enum
---
--- Deliberately using RENAME VALUE rather than dropping and
--- recreating the type. Recreating would break all four dependent
--- columns (profiles.role, invitations.role,
--- admin_audit_log.previous_role, admin_audit_log.next_role) AND the
--- manage_profile_lifecycle(UUID, admin_audit_action, user_role)
--- signature, each of which would have to be rebuilt and re-granted.
--- Renaming the value in place keeps every dependent object valid and
--- preserves the existing rows with no data movement.
---
--- ADD VALUE cannot run inside a transaction block on older Postgres,
--- which is why the guard below exists: on a server where it would
--- fail, apply steps 1a/1b manually before running the rest.
--- ──────────────────────────────────────────────
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
-    CREATE TYPE user_role AS ENUM ('SUPER_ADMIN', 'MANAGER', 'EMPLOYEE');
-  END IF;
-END $$;
-
--- 1a. ADMIN -> SUPER_ADMIN (no-op once already renamed).
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM pg_enum e
-    JOIN pg_type t ON t.oid = e.enumtypid
-    WHERE t.typname = 'user_role' AND e.enumlabel = 'ADMIN'
-  ) THEN
-    ALTER TYPE public.user_role RENAME VALUE 'ADMIN' TO 'SUPER_ADMIN';
-  END IF;
-END $$;
-
--- 1b. Add the manager tier.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_enum e
-    JOIN pg_type t ON t.oid = e.enumtypid
-    WHERE t.typname = 'user_role' AND e.enumlabel = 'MANAGER'
-  ) THEN
-    ALTER TYPE public.user_role ADD VALUE 'MANAGER';
-  END IF;
-END $$;
-
--- 1c. The retired ADMIN label is gone after 1a. Every row that held it
--- now reads SUPER_ADMIN, so nothing needs a data UPDATE. This is the
--- explicit statement of that invariant, and it also repairs any
--- database where the rename was applied to the type but not to rows.
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM pg_enum e
-    JOIN pg_type t ON t.oid = e.enumtypid
-    WHERE t.typname = 'user_role' AND e.enumlabel = 'ADMIN'
-  ) THEN
-    RAISE EXCEPTION
-      'user_role still contains an ADMIN label — rename it to SUPER_ADMIN before continuing';
-  END IF;
-END $$;
-
--- ──────────────────────────────────────────────
--- 2. Authorization helpers
+-- 1. Authorization helpers
 --
 -- is_active_admin() KEEPS ITS NAME and now means "active super
 -- admin". Every policy already keyed on it (clients, settings,
 -- labels, audit log, invitations) therefore becomes super-admin-only
--- automatically, which is exactly the intent: those are the
+-- automatically — exactly the intent, since those are the
 -- configuration and destructive surfaces managers must not reach.
 --
--- Names are deliberately unchanged so migrations 002/004/007/008 stay
--- valid history and a rollback does not have to unwind them.
+-- Names are unchanged so migrations 002/004/007/008 stay valid
+-- history and a rollback does not have to unwind them.
 -- ──────────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION public.is_active_admin(user_id UUID DEFAULT auth.uid())
@@ -130,9 +63,8 @@ AS $$
   );
 $$;
 
--- Manager tier: active AND role = MANAGER. Note this is NOT
--- "at least manager" — is_active_manager() is deliberately exact so
--- it can gate manager-specific behaviour, and is_active_staff() is
+-- Manager tier: active AND role = MANAGER. Deliberately NOT "manager
+-- or above" — is_active_manager() is exact, and is_active_staff() is
 -- the "manager or above" check.
 CREATE OR REPLACE FUNCTION public.is_active_manager(user_id UUID DEFAULT auth.uid())
 RETURNS BOOLEAN
@@ -170,9 +102,9 @@ AS $$
 $$;
 
 -- May the caller administer this specific project?
---   super admin            -> always
---   manager                -> only as a member of that project
---   anyone else            -> never
+--   super admin -> always
+--   manager     -> only as a member of that project
+--   anyone else -> never
 CREATE OR REPLACE FUNCTION public.can_manage_project(project_id UUID)
 RETURNS BOOLEAN
 LANGUAGE SQL
@@ -203,11 +135,10 @@ GRANT EXECUTE ON FUNCTION public.is_active_staff(UUID) TO authenticated, service
 GRANT EXECUTE ON FUNCTION public.can_manage_project(UUID) TO authenticated, service_role;
 
 -- ──────────────────────────────────────────────
--- 3. Clients
--- Managers manage clients. Hard delete stays super-admin only, which
--- the existing FOR ALL policy already guarantees because
--- is_active_admin() now means super admin; re-asserted here so the
--- intent is explicit and survives a future edit to the delete path.
+-- 2. Clients
+-- Managers manage clients. Hard delete stays super-admin only; the
+-- explicit DELETE policy below re-imposes that because the FOR ALL
+-- policy would otherwise widen it.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages clients" ON clients;
@@ -216,15 +147,13 @@ CREATE POLICY "Active staff manages clients"
   USING (public.is_active_staff())
   WITH CHECK (public.is_active_staff());
 
--- Hard delete is the one irreversible client action.
 DROP POLICY IF EXISTS "Super admin deletes clients" ON clients;
 CREATE POLICY "Super admin deletes clients"
   ON clients FOR DELETE TO authenticated
   USING (public.is_active_admin());
 
 -- ──────────────────────────────────────────────
--- 4. Projects
--- Staff manage projects; a manager only within their own projects.
+-- 3. Projects — managers only within their own projects.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages projects" ON projects;
@@ -233,14 +162,13 @@ CREATE POLICY "Active staff manages own projects"
   USING (public.can_manage_project(id))
   WITH CHECK (public.can_manage_project(id));
 
--- Hard delete: super admin only, even inside their own projects.
 DROP POLICY IF EXISTS "Super admin deletes projects" ON projects;
 CREATE POLICY "Super admin deletes projects"
   ON projects FOR DELETE TO authenticated
   USING (public.is_active_admin());
 
 -- ──────────────────────────────────────────────
--- 5. Project members — managers only for their own projects.
+-- 4. Project members — managers only for their own projects.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages project members" ON project_members;
@@ -250,7 +178,7 @@ CREATE POLICY "Active staff manages own project members"
   WITH CHECK (public.can_manage_project(project_id));
 
 -- ──────────────────────────────────────────────
--- 6. Project resources — managers only for their own projects.
+-- 5. Project resources — managers only for their own projects.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages project resources" ON project_resources;
@@ -260,10 +188,7 @@ CREATE POLICY "Active staff manages own project resources"
   WITH CHECK (public.can_manage_project(project_id));
 
 -- ──────────────────────────────────────────────
--- 7. Tasks
--- Staff act on tasks in their own projects. The FOR ALL policy covers
--- insert/update; the hard-delete policy below re-imposes the
--- super-admin-only rule that FOR ALL would otherwise widen.
+-- 6. Tasks
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages tasks" ON tasks;
@@ -278,9 +203,8 @@ CREATE POLICY "Super admin deletes tasks"
   USING (public.is_active_admin());
 
 -- ──────────────────────────────────────────────
--- 8. Task comments / attachments / labels / subtasks
--- These are all reachable when the parent task is, so a manager gains
--- access exactly where they gained task access.
+-- 7. Task comments / attachments — reachable when the parent task is,
+-- so a manager gains access exactly where they gained task access.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages task comments" ON task_comments;
@@ -322,6 +246,10 @@ CREATE POLICY "Active staff manages own task attachments"
         AND public.can_manage_project(t.project_id)
     )
   );
+
+-- ──────────────────────────────────────────────
+-- 8. Labels / task labels / subtasks
+-- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages labels" ON labels;
 CREATE POLICY "Active staff manages labels"
@@ -383,8 +311,8 @@ CREATE POLICY "Access subtasks via task access"
 
 -- ──────────────────────────────────────────────
 -- 9. Payments — staff run payroll; employees keep their own rows.
--- Payments are org-wide by nature (payroll is not per-project), so
--- there is no project scoping here.
+-- Payroll is org-wide rather than per-project, so there is no project
+-- scoping here.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admin manages payments" ON payments;
@@ -422,9 +350,10 @@ CREATE POLICY "Read accessible activity"
 
 -- ──────────────────────────────────────────────
 -- 11. Invitations — managers may invite, but only as EMPLOYEE.
--- The role ceiling is enforced here rather than in the policy body,
--- because the policy sees the row being written and can simply reject
--- a manager-issued invite carrying a privileged role.
+-- The role ceiling lives in the policy body because the policy sees
+-- the row being written and can reject a manager-issued invite
+-- carrying a privileged role. lib/actions/invitations.ts enforces the
+-- same rule so the refusal reads as a clean error, not an RLS failure.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admins manage invitations" ON invitations;
@@ -440,9 +369,8 @@ CREATE POLICY "Active staff manages invitations"
   );
 
 -- ──────────────────────────────────────────────
--- 12. Audit log — readable by staff (it is an operational record),
--- writable only by super admin, matching who can actually change a
--- role. Managers appear in it as actors; they cannot forge entries.
+-- 12. Audit log — readable by staff, writable only by super admin,
+-- matching who can actually change a role.
 -- ──────────────────────────────────────────────
 
 DROP POLICY IF EXISTS "Active admins can read admin audit log" ON admin_audit_log;
@@ -459,32 +387,29 @@ CREATE POLICY "Super admins can write admin audit log"
 
 -- ──────────────────────────────────────────────
 -- 13. New audit action for the refused escalation.
--- Recorded when a non-super-admin attempts to touch a privileged
--- target, so the attempt is auditable rather than merely rejected.
+--
+-- The ADD VALUE itself lives in 013_role_enum_values.sql, not here.
+-- This file INSERTS 'ROLE_REQUIRES_SUPER_ADMIN' into
+-- admin_audit_log.action (see the lifecycle RPC below), and Postgres
+-- refuses to use a new enum value in the transaction that created it.
+-- Adding it here and using it here would fail with 55P04 all over
+-- again. Adding it in 013 and using it here is correct, because 013
+-- has committed by the time this file runs.
 -- ──────────────────────────────────────────────
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_enum e
-    JOIN pg_type t ON t.oid = e.enumtypid
-    WHERE t.typname = 'admin_audit_action' AND e.enumlabel = 'ROLE_REQUIRES_SUPER_ADMIN'
-  ) THEN
-    ALTER TYPE public.admin_audit_action ADD VALUE 'ROLE_REQUIRES_SUPER_ADMIN';
-  END IF;
-END $$;
 
 -- ──────────────────────────────────────────────
 -- 14. Profile lifecycle RPC — role-change authority.
 --
 -- The critical property: a MANAGER can never grant MANAGER or
 -- SUPER_ADMIN, and can never act on a target that already holds
--- either. That second rule is what stops a manager from suspending
--- a peer or a super admin, which the pre-013 check (target is
--- privileged AND caller is staff) did not cover.
+-- either. That second rule is what stops a manager suspending a peer
+-- or a super admin.
 --
 -- APPROVE is gated on the REQUESTED role, not just the action name,
--- because it writes profiles.role as well as profiles.status.
+-- because it writes profiles.role as well as profiles.status. Gating
+-- on the action name alone is what would let a manager mint a
+-- SUPER_ADMIN by approving a pending user with requested_role set to
+-- SUPER_ADMIN.
 -- ──────────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION public.manage_profile_lifecycle(
@@ -607,8 +532,7 @@ BEGIN
     END IF;
   END IF;
 
-  -- A manager must not be able to demote a super admin sideways, and
-  -- must not be able to leave an account with no owner.
+  -- A manager must not be able to demote a super admin sideways.
   IF target.role = 'SUPER_ADMIN'
      AND next_role IS DISTINCT FROM 'SUPER_ADMIN'
      AND next_role IS NOT NULL
@@ -653,9 +577,9 @@ GRANT EXECUTE ON FUNCTION public.manage_profile_lifecycle(UUID, admin_audit_acti
 -- ──────────────────────────────────────────────
 -- 15. Self-authorization guard, widened to staff.
 --
--- Previously only a super admin could change anyone's role/status.
--- A manager now legitimately changes an employee's status, so the
--- trigger has to permit that — while still blocking self-edits, which
+-- Previously only a super admin could change anyone's role/status. A
+-- manager now legitimately changes an employee's status, so the
+-- trigger must permit that — while still blocking self-edits, which
 -- no role may do.
 -- ──────────────────────────────────────────────
 

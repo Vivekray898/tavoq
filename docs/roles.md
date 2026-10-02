@@ -94,24 +94,49 @@ pnpm typecheck
 pnpm lint
 ```
 
-`tests/roles.db.test.ts` additionally exercises RLS and the lifecycle RPC against
-a live database. It **skips** rather than fails when none is reachable. To run
-it:
+`tests/roles.db.test.ts` additionally exercises the helpers and the lifecycle RPC
+against a live database. It **skips with the reason** rather than failing when no
+database is reachable, or when the credentials point at a database where
+migration 014 has not been applied — that is a state of the environment, not a
+defect in the code.
+
+To run it against your project:
 
 ```bash
-supabase start                                       # needs Docker
-export SUPABASE_URL="http://127.0.0.1:54321"
-export SUPABASE_SERVICE_ROLE_KEY="$(supabase status -o env \
-  | grep SUPABASE_SERVICE_ROLE_KEY | cut -d= -f2- | tr -d '"')"
+export SUPABASE_URL="https://<your-project>.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="<service_role key>"
 pnpm test
 ```
 
+For the per-role RLS assertions (a manager reading another project's rows, an
+employee reading another's payments) you additionally need signed-in clients, which
+require real test accounts; those cases are documented inline in the file.
+
 ## Migration
 
-`supabase/migrations/013_role_hierarchy.sql`, applied after `012`. It renames the
-`ADMIN` enum value to `SUPER_ADMIN` in place rather than recreating the type,
-which keeps every dependent column and the `manage_profile_lifecycle()` signature
-valid, and moves no data. It is idempotent — running it twice is a no-op.
+Applied in two files, in order after `012`:
 
-A down-migration is documented in a comment at the top of the file. Reverting is
+- `013_role_enum_values.sql` — widens the enum only: renames `ADMIN` to
+  `SUPER_ADMIN` in place and adds `MANAGER` and `ROLE_REQUIRES_SUPER_ADMIN`.
+- `014_role_hierarchy.sql` — the helpers, RLS policies and the reworked
+  `manage_profile_lifecycle()`.
+
+**The split is not cosmetic.** Postgres refuses to use an enum value in the same
+transaction that created it (`ERROR 55P04: unsafe use of new value "MANAGER"`), so
+a value must be committed by the end of one migration before the next may reference
+it. Every `ADD VALUE` lives in 013; only 014 consumes them.
+
+```bash
+supabase db push          # applies 010 → 014 in order
+```
+
+Renaming rather than recreating the type keeps all four dependent columns and the
+`manage_profile_lifecycle()` signature valid, and moves no data. Both files are
+idempotent.
+
+`pnpm test` includes a static check (`scripts/verify-migration-enum-order.mjs`)
+that fails if any migration both adds an enum value and uses it, so this split
+cannot silently regress.
+
+A down-migration is documented in a comment at the top of each file. Reverting is
 lossy: a `MANAGER` cannot be mapped back to a distinct former role.

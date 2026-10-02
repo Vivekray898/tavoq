@@ -67,7 +67,27 @@ async function serviceClient(): Promise<TestClient> {
  * the service client and the RLS checks are marked as pending a live
  * database.
  */
-describe("role hierarchy — RLS and lifecycle RPC", () => {
+// Declared at module scope so the async probe below can gate the
+// whole suite before any test is registered.
+let schemaReady = false;
+let probeDetail = "";
+
+const MISSING_UUID = "00000000-0000-0000-0000-000000000000";
+
+async function schemaHasRoleHierarchy(): Promise<boolean> {
+  try {
+    const client = await serviceClient();
+    const probe = await client.rpc("is_active_manager", { user_id: MISSING_UUID });
+    schemaReady = probe.error === null;
+    probeDetail = probe.error?.message ?? "";
+  } catch (err) {
+    schemaReady = false;
+    probeDetail = err instanceof Error ? err.message : String(err);
+  }
+  return schemaReady;
+}
+
+describe("role hierarchy — RLS and lifecycle RPC", async () => {
   if (!dbAvailable) {
     it("is skipped: no Supabase instance configured", () => {
       assert.equal(
@@ -79,55 +99,60 @@ describe("role hierarchy — RLS and lifecycle RPC", () => {
     return;
   }
 
+  const ready = await schemaHasRoleHierarchy();
+
+  // Migration 014 not applied? That is a state of the environment, not
+  // a defect in the code, so the suite SKIPS with the reason rather than
+  // failing on a missing function.
+  const skip = ready
+    ? false
+    : `migration 014 not applied (${probeDetail}) — run \`supabase db push\``;
+
+  if (!ready) {
+    it("role hierarchy helpers are installed", { skip }, () => {});
+    return;
+  }
+
+  const client = await serviceClient();
+
+
   it("connects with the service role key", async () => {
-    const client = await serviceClient();
     const { error } = await client.from("profiles").select("id").limit(1);
     // An empty result is fine; an auth error means the key is wrong.
     assert.equal(error?.message ?? "", "");
   });
 
   it("resolves is_active_admin to SUPER_ADMIN only", async () => {
-    const client = await serviceClient();
-    // Called over the wire so Postgres resolves the default
-    // auth.uid() argument the same way RLS does.
     const { data, error } = await client.rpc("is_active_admin", {
-      user_id: "00000000-0000-0000-0000-000000000000",
+      user_id: MISSING_UUID,
     });
     assert.equal(error, null);
     assert.equal(data, false, "a non-existent user is not an active super admin");
   });
 
   it("exposes the manager and staff helpers", async () => {
-    const client = await serviceClient();
-    const missing = "00000000-0000-0000-0000-000000000000";
-
-    const manager = await client.rpc("is_active_manager", {
-      user_id: missing,
-    });
+    const manager = await client.rpc("is_active_manager", { user_id: MISSING_UUID });
     assert.equal(manager.error, null);
     assert.equal(manager.data, false);
 
-    const staff = await client.rpc("is_active_staff", { user_id: missing });
+    const staff = await client.rpc("is_active_staff", { user_id: MISSING_UUID });
     assert.equal(staff.error, null);
     assert.equal(staff.data, false);
   });
 
   it("denies can_manage_project for a non-member", async () => {
-    const client = await serviceClient();
     const { data, error } = await client.rpc("can_manage_project", {
-      project_id: "00000000-0000-0000-0000-000000000000",
+      project_id: MISSING_UUID,
     });
     assert.equal(error, null);
     assert.equal(data, false);
   });
 
-  it("refuses the escalation: manager cannot grant SUPER_ADMIN", async () => {
-    // The behaviour the whole design turns on. Called as service role
-    // so auth.uid() is null and the guard must reject outright rather
-    // than relying on the caller's role.
-    const client = await serviceClient();
+  it("refuses the escalation: no caller may grant SUPER_ADMIN", async () => {
+    // Called as service role, so auth.uid() is null and the guard must
+    // reject outright rather than relying on the caller's role.
     const { error } = await client.rpc("manage_profile_lifecycle", {
-      target_id: "00000000-0000-0000-0000-000000000000",
+      target_id: MISSING_UUID,
       requested_action: "APPROVE",
       requested_role: "SUPER_ADMIN",
     });

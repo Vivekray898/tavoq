@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"tests/**/*.test.ts\"",
+    "test": "node --test \"tests/**/*.test.ts\" && node scripts/verify-migration-enum-order.mjs",
     "test:cron-gate": "node scripts/verify-cron-gate.mjs proxy.ts"
   },
   "dependencies": {
