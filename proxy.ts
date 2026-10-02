@@ -9,7 +9,8 @@ import { createServerClient, type CookieMethodsServer } from "@supabase/ssr";
  * type — even before any server component or RLS policy runs.
  *
  * Public routes: /login, /signup, /pending, /suspended, /invite/*,
- * /auth/*, /offline, /manifest.json, /icons/*, /sw.js and static assets.
+ * /auth/*, /offline, /manifest.json, /icons/*, /sw.js, /api/push,
+ * /api/cron/* and static assets.
  */
 const PUBLIC_PREFIXES = [
   "/login",
@@ -25,6 +26,10 @@ const PUBLIC_PREFIXES = [
   "/icons",
   "/sw.js",
   "/api/push",
+  // Vercel Cron invokes these with `Authorization: Bearer $CRON_SECRET`
+  // and no session cookie, so the proxy must let them through — the
+  // route handler verifies the secret itself.
+  "/api/cron",
 ];
 
 /**
