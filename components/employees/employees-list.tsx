@@ -209,25 +209,58 @@ export function EmployeesList() {
           {visibleMembers.map((member) => (
             <div
               key={member.id}
-              className="flex items-center gap-3.5 px-4 py-3.5 transition-colors hover:bg-accent/50"
+              className="flex flex-col gap-3 px-4 py-3.5 transition-colors hover:bg-accent/50 sm:flex-row sm:items-center sm:gap-3.5"
             >
-              <Avatar className="size-10 shrink-0">
-                <AvatarFallback className="text-sm">
-                  {member.full_name
-                    .split(" ")
-                    .map((part) => part[0])
-                    .slice(0, 2)
-                    .join("")
-                    .toUpperCase()}
-                </AvatarFallback>
-              </Avatar>
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{member.full_name}</p>
-                <p className="truncate text-[13px] text-muted-foreground">{member.email}</p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  {member.role ?? "No role"} · Joined {formatDate(member.created_at)} · {member.projects_count} projects
-                </p>
+              {/* Profile Info */}
+              <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                <Avatar className="size-10 shrink-0">
+                  <AvatarFallback className="text-sm">
+                    {member.full_name
+                      .split(" ")
+                      .map((part) => part[0])
+                      .slice(0, 2)
+                      .join("")
+                      .toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{member.full_name}</p>
+                  <p className="truncate text-[13px] text-muted-foreground">{member.email}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {member.role ?? "No role"} · Joined {formatDate(member.created_at)} · {member.projects_count} projects
+                  </p>
+                </div>
               </div>
+
+              {/* Stats - Visible on mobile as grid, hidden on desktop because they show in the row */}
+              <div className="flex sm:hidden items-center justify-between gap-2 rounded-lg bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                <span className="text-center">
+                  <span className="block text-sm font-semibold tabular-nums text-foreground">
+                    {member.active_tasks}
+                  </span>
+                  active
+                </span>
+                <span className="text-center">
+                  <span className={cn("block text-sm font-semibold tabular-nums", member.overdue_tasks > 0 && "text-destructive")}>
+                    {member.overdue_tasks}
+                  </span>
+                  overdue
+                </span>
+                <span className="text-center">
+                  <span className={cn("block text-sm font-semibold tabular-nums", member.awaiting_review > 0 && "text-violet-600 dark:text-violet-400")}>
+                    {member.awaiting_review}
+                  </span>
+                  in review
+                </span>
+                <span className="text-center">
+                  <span className={cn("block text-sm font-semibold tabular-nums", member.pending_payment > 0 && "text-amber-600 dark:text-amber-400")}>
+                    {formatCurrency(member.pending_payment)}
+                  </span>
+                  pending
+                </span>
+              </div>
+
+              {/* Stats - Hidden on mobile, shown on desktop */}
               <div className="hidden shrink-0 items-center gap-5 text-xs text-muted-foreground sm:flex">
                 <span className="text-center">
                   <span className="block text-sm font-semibold tabular-nums text-foreground">
@@ -260,7 +293,9 @@ export function EmployeesList() {
                   projects
                 </span>
               </div>
-              <div className="flex shrink-0 items-center gap-1">
+
+              {/* Action Buttons */}
+              <div className="flex flex-wrap shrink-0 items-center gap-1">
                 <Link href={`/employees/${member.id}`}>
                   <Button type="button" variant="ghost" size="sm">View</Button>
                 </Link>
