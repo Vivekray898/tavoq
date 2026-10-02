@@ -569,7 +569,10 @@ export function AdminPaymentsView() {
       if (next.has(id)) next.delete(id);
       else {
         const task = (tasksQuery.data ?? []).find((t) => t.id === id);
-        if (task && task.payout_amount > 0) next.set(id, task.payout_amount);
+        // Selecting must never silently fail: default to the task's
+        // suggested payout, or 0 when unset — the admin can type the
+        // real amount in the enabled input.
+        next.set(id, Number(task?.payout_amount ?? 0));
       }
       return next;
     });
@@ -596,7 +599,7 @@ export function AdminPaymentsView() {
       }
       const next = new Map(prev);
       for (const t of visibleTasks) {
-        if (!t.has_payment && t.payout_amount > 0) next.set(t.id, t.payout_amount);
+        if (!t.has_payment) next.set(t.id, Number(t.payout_amount ?? 0));
       }
       return next;
     });

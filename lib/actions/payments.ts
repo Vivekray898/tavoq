@@ -247,9 +247,13 @@ export interface PayableTask {
 }
 
 /**
- * The selected employee's payable tasks: only their own assigned,
- * non-completed tasks from active projects, each flagged when a
- * payment record already exists (duplicate guard).
+ * The selected employee's payable tasks: only their own assigned
+ * tasks from active projects, each flagged when a payment record
+ * already exists (duplicate guard).
+ *
+ * Completed tasks are included on purpose — completing a task is what
+ * makes it payable, and the completion trigger may already have created
+ * its PENDING payment row.
  */
 export async function getEmployeePayableTasks(
   employeeId: string
@@ -265,7 +269,6 @@ export async function getEmployeePayableTasks(
           "id, title, status, deadline, payout_amount, payment_status, project:projects(name, status)"
         )
         .eq("assigned_to", employeeId)
-        .neq("status", "COMPLETED")
         .order("deadline", { ascending: true, nullsFirst: false }),
       supabase.from("payments").select("task_id").not("task_id", "is", null),
     ]);
@@ -288,7 +291,8 @@ export async function getEmployeePayableTasks(
       title: string;
       status: string;
       deadline: string | null;
-      payout_amount: number;
+      /** NUMERIC arrives as a string from PostgREST; null when unset. */
+      payout_amount: number | string | null;
       payment_status: string;
       project: { name: string; status: string }[] | { name: string; status: string } | null;
     };
@@ -302,7 +306,7 @@ export async function getEmployeePayableTasks(
         project_name: project?.name ?? null,
         status: row.status,
         deadline: row.deadline,
-        payout_amount: Number(row.payout_amount),
+        payout_amount: Number(row.payout_amount ?? 0),
         payment_status: row.payment_status,
         has_payment: paidTaskIds.has(row.id),
       };
@@ -393,8 +397,16 @@ export async function createPaymentFromTasks(
 
     for (const task of rows) {
       const existingId = existingByTask.get(task.id);
-      const amount = amountByTask.get(task.id) ?? Number(task.payout_amount);
-      if (!(amount > 0)) continue;
+      const amount = amountByTask.get(task.id) ?? Number(task.payout_amount ?? 0);
+      if (!(amount > 0)) {
+        // The confirm dialog should never send these; warn instead of
+        // silently dropping the row so a real regression is visible.
+        console.warn(
+          "[createPaymentFromTasks] skipping task with a non-positive amount",
+          { taskId: task.id, amount }
+        );
+        continue;
+      }
       totalAmount += amount;
 
       const paymentRow = {
