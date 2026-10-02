@@ -33,17 +33,20 @@ import type { TaskStatus } from "@/types/database";
 
 interface BoardProps {
   tasks: TaskListItem[];
-  currentUserId: string;
-  isAdmin: boolean;
+  /** Unused now that any card may move to any column; kept so the
+   *  caller (tasks page) doesn't need to change. */
+  currentUserId?: string;
+  isAdmin?: boolean;
 }
 
 /**
  * §7 Kanban board — five status columns, drag-and-drop with optimistic
- * update and rollback on failure. Transitions are validated client-side
- * (mirroring §28) and enforced server-side. Success writes the confirmed
- * status into the shared cache — no list refetch needed.
+ * update and rollback on failure. Any card may be dropped into any
+ * column; there are no client-side transition guards, and the server
+ * plus DB trigger only enforce authorization. Success writes the
+ * confirmed row into the shared cache — no list refetch needed.
  */
-export function BoardView({ tasks, currentUserId, isAdmin }: BoardProps) {
+export function BoardView({ tasks }: BoardProps) {
   const queryClient = useQueryClient();
   const [items, setItems] = useState<TaskListItem[]>(tasks);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -87,33 +90,10 @@ export function BoardView({ tasks, currentUserId, isAdmin }: BoardProps) {
       targetStatus = overId as TaskStatus;
     } else {
       const overTask = items.find((t) => t.id === overId);
-      if (overTask && overTask.status !== task.status) targetStatus = overTask.status;
+      // Same-column drop: no status change, so no mutation is fired.
+      if (overTask) targetStatus = overTask.status;
     }
     if (!targetStatus || targetStatus === task.status) return;
-
-    // Client-side transition validation (§28)
-    const allowed =
-      isAdmin
-        ? // Admin: SUBMITTED → COMPLETED/REVISION, plus resets back
-          (task.status === "SUBMITTED" &&
-            (targetStatus === "COMPLETED" || targetStatus === "REVISION_REQUIRED")) ||
-          targetStatus === "TODO" ||
-          targetStatus === "IN_PROGRESS" ||
-          targetStatus === "COMPLETED"
-        : task.assigned_to === currentUserId &&
-          ((task.status === "TODO" && targetStatus === "IN_PROGRESS") ||
-            (task.status === "IN_PROGRESS" && targetStatus === "SUBMITTED") ||
-            (task.status === "REVISION_REQUIRED" && targetStatus === "IN_PROGRESS") ||
-            (task.status === "REVISION_REQUIRED" && targetStatus === "SUBMITTED"));
-
-    if (!allowed) {
-      toast.error(
-        isAdmin
-          ? `Can't move to ${TASK_STATUS_LABELS[targetStatus]} from ${TASK_STATUS_LABELS[task.status]}`
-          : "You can only move your own tasks (To do → In progress → Submitted)"
-      );
-      return;
-    }
 
     // Optimistic move (§38) — rollback on failure
     const prevStatus = task.status;

@@ -624,7 +624,9 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
 }
 
 // ──────────────────────────────────────────────
-// Status transitions (§28) — enforced here AND in the DB trigger
+// Status updates — any of the five values, any direction.
+// Authorization only (admin, or the assignee); no transition
+// allow-list here or in the DB trigger.
 // ──────────────────────────────────────────────
 
 export async function updateTaskStatus(
@@ -646,53 +648,41 @@ export async function updateTaskStatus(
       return { success: false, error: "Task not found" };
     }
 
+    // Authorization only — admins may move any task, employees only
+    // their own. Which status they're allowed to move it to is
+    // unrestricted.
     const isAdmin = profile.role === "ADMIN";
     const isAssignee = currentTask.assigned_to === profile.id;
-
-    if (isAdmin) {
-      // Admin rules: SUBMITTED → COMPLETED or REVISION_REQUIRED.
-      // Also allowed: move any task back to TODO / IN_PROGRESS.
-      const allowed =
-        (currentTask.status === "SUBMITTED" &&
-          (status === "COMPLETED" || status === "REVISION_REQUIRED")) ||
-        status === "TODO" ||
-        status === "IN_PROGRESS" ||
-        status === "COMPLETED";
-      if (!allowed) {
-        return { success: false, error: "Not an allowed transition" };
-      }
-    } else {
-      // Employee rules: must be the assignee.
-      if (!isAssignee) {
-        return { success: false, error: "You can only update your own tasks" };
-      }
-      const allowed =
-        (currentTask.status === "TODO" && status === "IN_PROGRESS") ||
-        (currentTask.status === "IN_PROGRESS" && status === "SUBMITTED") ||
-        (currentTask.status === "REVISION_REQUIRED" &&
-          status === "IN_PROGRESS") ||
-        (currentTask.status === "REVISION_REQUIRED" && status === "SUBMITTED");
-      if (!allowed) {
-        return { success: false, error: "Not an allowed transition" };
-      }
+    if (!isAdmin && !isAssignee) {
+      return { success: false, error: "You can only update your own tasks" };
     }
 
-    const updateData: Record<string, unknown> = { status };
+    // Set completed_at explicitly in the same UPDATE rather than
+    // relying on the trigger alone, so the returned row is already
+    // coherent for the caller's cache patch.
+    const updateData: Record<string, unknown> = {
+      status,
+      completed_at: status === "COMPLETED" ? new Date().toISOString() : null,
+    };
     if (status === "COMPLETED") {
-      updateData.completed_at = new Date().toISOString();
-
-      // Mark payable on completion if it has a payout and is not yet paid
-      const { data: pay } = await supabase
-        .from("tasks")
-        .select("payout_amount, payment_status")
-        .eq("id", taskId)
-        .single();
-      if (
-        pay &&
-        Number(pay.payout_amount) > 0 &&
-        pay.payment_status === "NOT_APPLICABLE"
-      ) {
-        updateData.payment_status = "PENDING";
+      // Mark payable on completion if it has a payout and is not yet paid.
+      // payment_status is a protected column: the DB trigger rejects it
+      // from anyone who isn't an admin, so only admins may set it here.
+      // Employees completing their own task rely on the
+      // create_payment_on_task_completion trigger instead (migration 010).
+      if (isAdmin) {
+        const { data: pay } = await supabase
+          .from("tasks")
+          .select("payout_amount, payment_status")
+          .eq("id", taskId)
+          .single();
+        if (
+          pay &&
+          Number(pay.payout_amount) > 0 &&
+          pay.payment_status === "NOT_APPLICABLE"
+        ) {
+          updateData.payment_status = "PENDING";
+        }
       }
     }
 
@@ -705,10 +695,10 @@ export async function updateTaskStatus(
 
     if (error) {
       console.error("[updateTaskStatus]", error);
-      const msg = error.message.includes("allowed status transition")
-        ? "That status change isn't allowed"
-        : error.message.includes("Not allowed to modify")
-          ? "You can only update your own tasks"
+      const msg = error.message.includes("not assigned to you")
+        ? "You can only update your own tasks"
+        : error.message.includes("protected task fields")
+          ? "You can't change that field"
           : "Failed to update task";
       return { success: false, error: msg };
     }
@@ -1029,19 +1019,10 @@ export async function bulkUpdateTasks(
     }
 
     if (changes.status) {
-      // Admin transitions — same rules as updateTaskStatus.
-      const allowed =
-        changes.status === "TODO" ||
-        changes.status === "IN_PROGRESS" ||
-        changes.status === "COMPLETED";
-      if (!allowed) {
-        return {
-          success: false,
-          error: "Bulk status change only supports To do, In progress or Completed",
-        };
-      }
+      // Any of the five statuses, same as updateTaskStatus.
       update.status = changes.status;
-      if (changes.status === "COMPLETED") update.completed_at = new Date().toISOString();
+      update.completed_at =
+        changes.status === "COMPLETED" ? new Date().toISOString() : null;
     }
 
     if (changes.priority) update.priority = changes.priority;
@@ -1071,10 +1052,7 @@ export async function bulkUpdateTasks(
 
     if (error) {
       console.error("[bulkUpdateTasks]", error);
-      const msg = error.message.includes("allowed status transition")
-        ? "Some tasks can't move to that status — try Completed or In progress"
-        : "Failed to update the selected tasks";
-      return { success: false, error: msg };
+      return { success: false, error: "Failed to update the selected tasks" };
     }
 
     // Assignment notifications — same payload as single edit, batched

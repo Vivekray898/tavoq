@@ -19,17 +19,11 @@ export const APP_NAME = "Taskora";
 // ──────────────────────────────────────────────
 
 /**
- * §28 — allowed status transitions, shared by the server action and
- * mirrored in the DB trigger (migration 002).
+ * Status transitions are unrestricted: a task may move between any of
+ * the five statuses in either direction. Only authorization applies —
+ * admins may move any task, employees only their own (enforced in
+ * lib/actions/tasks.ts and the enforce_task_update_rules trigger).
  */
-export const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  TODO: ["IN_PROGRESS"],
-  IN_PROGRESS: ["SUBMITTED"],
-  SUBMITTED: ["COMPLETED", "REVISION_REQUIRED"],
-  REVISION_REQUIRED: ["IN_PROGRESS", "SUBMITTED"],
-  COMPLETED: [],
-};
-
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   TODO: "To do",
   IN_PROGRESS: "In progress",
