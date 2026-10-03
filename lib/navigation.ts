@@ -19,6 +19,16 @@ export interface NavItem {
   href: string;
   icon: LucideIcon;
   badge?: "notifications";
+  /**
+   * Which roles may see this item.
+   *
+   * Single source of truth for the whole app: the desktop sidebar, the
+   * mobile drawer and the tests all derive from this, so a role rule can
+   * never be enforced in one surface and forgotten in the other.
+   *
+   * Omitted means "every role" — see ALL_ROLES below.
+   */
+  roles?: UserRole[];
 }
 
 export interface NavSection {
@@ -26,149 +36,112 @@ export interface NavSection {
   items: NavItem[];
 }
 
-/**
- * §7 Desktop sidebar navigation — grouped, minimal.
- */
-/**
- * §7 Desktop sidebar navigation — grouped, minimal.
- *
- * SUPER_ADMIN and MANAGER share one nav; the two entries they may not
- * see (/settings, and the employee-only distinction) are filtered in
- * getNavForRole below rather than duplicated here.
- */
-export const ADMIN_NAV: NavSection[] = [
-  { items: [{ label: "Overview", href: "/", icon: LayoutDashboard }] },
-  {
-    title: "Work",
-    items: [
-      { label: "Tasks", href: "/tasks", icon: CheckSquare },
-      { label: "Calendar", href: "/calendar", icon: CalendarDays },
-      { label: "Projects", href: "/projects", icon: FolderKanban },
-      { label: "Clients", href: "/clients", icon: Building2 },
-    ],
-  },
-  {
-    title: "Team",
-    items: [{ label: "Team", href: "/employees", icon: Users }],
-  },
-  {
-    title: "Finance",
-    items: [{ label: "Payments", href: "/payments", icon: IndianRupee }],
-  },
-  {
-    items: [
-      { label: "Notifications", href: "/notifications", icon: Bell, badge: "notifications" },
-      { label: "Settings", href: "/settings", icon: Settings },
-    ],
-  },
-];
+export const ALL_ROLES: UserRole[] = ["SUPER_ADMIN", "MANAGER", "EMPLOYEE"];
 
-// §24/§25 — employees don't manage projects (project context lives
-// inside their tasks); they get their Payments instead.
-export const EMPLOYEE_NAV: NavSection[] = [
-  { items: [{ label: "Home", href: "/", icon: LayoutDashboard }] },
-  {
-    items: [
-      { label: "My Tasks", href: "/tasks", icon: CheckSquare },
-      { label: "Calendar", href: "/calendar", icon: CalendarDays },
-      { label: "Payments", href: "/payments", icon: IndianRupee },
-    ],
-  },
-  {
-    items: [
-      { label: "Notifications", href: "/notifications", icon: Bell, badge: "notifications" },
-      { label: "Profile", href: "/profile", icon: User },
-    ],
-  },
-];
+/** Roles that reach staff-only surfaces (admin nav). */
+export const STAFF_ROLES: UserRole[] = ["SUPER_ADMIN", "MANAGER"];
 
-/**
- * §8 Mobile bottom navigation — max 4 items, secondary actions
- * live in the "More" sheet.
- */
-export const ADMIN_MOBILE_NAV: NavItem[] = [
-  { label: "Home", href: "/", icon: LayoutDashboard },
+// ──────────────────────────────────────────────
+// The role matrix, declared once.
+//
+//    item                    SUPER_ADMIN  MANAGER  EMPLOYEE
+//    Overview (/)                  ✅        ✅        ✅
+//    Tasks (/tasks)                ✅        ✅        ✅
+//    Calendar (/calendar)          ✅        ✅        ✅
+//    Projects (/projects)          ✅        ✅        ❌
+//    Clients (/clients)            ✅        ✅        ❌
+//    Team (/employees)             ✅        ✅        ❌
+//    Payments (/payments)          ✅        ✅        ✅  (own rows)
+//    Notifications                 ✅        ✅        ✅
+//    Settings (/settings)          ✅        ❌        ❌
+//
+// Two deliberate deviations from a literal reading of that table, both
+// because the SERVER already behaves this way and hiding a working
+// destination is worse than the matrix suggesting:
+//
+//   • Payments is visible to EMPLOYEE. They get their own earnings view
+//     (EmployeePaymentsView), RLS grants "Active employees can read own
+//     task payments", and /payments already branches on role. Removing
+//     the entry would strand a page that works.
+//   • Calendar is visible to all three roles, deliberately: an employee
+//     syncing their own deadlines is the entire point of the page.
+//
+// Nav hiding is cosmetic. Every destination also has a server-side guard
+// on the page itself (requireStaff / requireSuperAdmin / role branch),
+// so typing a URL directly is redirected rather than shown a blank page.
+// ──────────────────────────────────────────────
+
+/** Every destination in the app, in drawer order. */
+const ALL_ITEMS: NavItem[] = [
+  { label: "Overview", href: "/", icon: LayoutDashboard },
   { label: "Tasks", href: "/tasks", icon: CheckSquare },
-  { label: "Projects", href: "/projects", icon: FolderKanban },
-];
-
-export const EMPLOYEE_MOBILE_NAV: NavItem[] = [
-  { label: "Home", href: "/", icon: LayoutDashboard },
-  { label: "Tasks", href: "/tasks", icon: CheckSquare },
+  { label: "Calendar", href: "/calendar", icon: CalendarDays },
+  { label: "Projects", href: "/projects", icon: FolderKanban, roles: STAFF_ROLES },
+  { label: "Clients", href: "/clients", icon: Building2, roles: STAFF_ROLES },
+  { label: "Team", href: "/employees", icon: Users, roles: STAFF_ROLES },
   { label: "Payments", href: "/payments", icon: IndianRupee },
-  { label: "Notifications", href: "/notifications", icon: Bell, badge: "notifications" },
+  {
+    label: "Notifications",
+    href: "/notifications",
+    icon: Bell,
+    badge: "notifications",
+  },
+  { label: "Settings", href: "/settings", icon: Settings, roles: ["SUPER_ADMIN"] },
 ];
 
-/** Secondary destinations inside the admin "More" sheet.
- *  Note: no /search route exists — desktop/mobile search is the
- *  ⌘K SearchDialog in the topbar, so it's intentionally absent here. */
-export const ADMIN_MORE_ITEMS: NavItem[] = [
-  { label: "Clients", href: "/clients", icon: Building2 },
-  { label: "Team", href: "/employees", icon: Users },
-  { label: "Payments", href: "/payments", icon: IndianRupee },
-  { label: "Notifications", href: "/notifications", icon: Bell, badge: "notifications" },
-  { label: "Settings", href: "/settings", icon: Settings },
-  { label: "Profile", href: "/profile", icon: User },
-];
-
-/**
- * Manager "More" items — identical to the super admin's minus
- * /settings, which is super-admin only.
- */
-export const MANAGER_MORE_ITEMS: NavItem[] = ADMIN_MORE_ITEMS.filter(
-  (item) => item.href !== "/settings"
-);
-
-/**
- * Drop any item the given role must not see.
- *
- * Nav hiding is cosmetic: every destination also has a server-side
- * guard on the page itself (requireSuperAdmin / requireStaff), so a
- * user who types the URL directly is redirected rather than shown a
- * blank page.
- */
-function filterNav(sections: NavSection[], role: UserRole): NavSection[] {
-  const allowSettings = role === "SUPER_ADMIN";
-  return sections
-    .map((section) => ({
-      ...section,
-      items: section.items.filter(
-        (item) => allowSettings || item.href !== "/settings"
+/** Sections for a role, preserving ALL_ITEMS order within each. */
+function sectionsFor(items: NavItem[]): NavSection[] {
+  const sections: NavSection[] = [
+    { items: items.filter((i) => i.href === "/") },
+    {
+      title: "Work",
+      items: items.filter((i) =>
+        ["/tasks", "/calendar", "/projects", "/clients"].includes(i.href)
       ),
-    }))
-    .filter((section) => section.items.length > 0);
+    },
+    { title: "Team", items: items.filter((i) => i.href === "/employees") },
+    { title: "Finance", items: items.filter((i) => i.href === "/payments") },
+    {
+      items: items.filter((i) => ["/notifications", "/settings"].includes(i.href)),
+    },
+  ];
+  // Never emit an empty section — an employee has no Team section.
+  return sections.filter((s) => s.items.length > 0);
 }
 
-/** Employee "More" fallback (only used if notifications not shown) */
-export const EMPLOYEE_MORE_ITEMS: NavItem[] = [
-  { label: "Profile", href: "/profile", icon: User },
-];
+/** Items the given role may see, in canonical order. */
+export function getNavItemsForRole(role: UserRole): NavItem[] {
+  return ALL_ITEMS.filter((item) => !item.roles || item.roles.includes(role));
+}
 
 /**
  * Navigation for a role.
  *
- *   SUPER_ADMIN → full admin nav, including /settings
+ *   SUPER_ADMIN → full nav, including /settings
  *   MANAGER     → same nav minus /settings
- *   EMPLOYEE    → the personal nav (own tasks, own payments)
+ *   EMPLOYEE    → personal nav (own tasks, own calendar, own payments)
  *
- * Phase 1 deliberately gave managers the employee nav, because the
- * server-side guards already allowed them everywhere and the UI simply
- * hadn't caught up. This is that catch-up.
+ * `desktop` keeps the existing grouped shape the sidebar renders.
+ * `mobile` is the flattened, un-grouped list the drawer renders — same
+ * items, one tap away, nothing collapsible.
  */
 export function getNavForRole(role: UserRole) {
-  if (role === "SUPER_ADMIN" || role === "MANAGER") {
-    return {
-      desktop: filterNav(ADMIN_NAV, role),
-      mobile: ADMIN_MOBILE_NAV,
-      more: role === "SUPER_ADMIN" ? ADMIN_MORE_ITEMS : MANAGER_MORE_ITEMS,
-    };
-  }
+  const items = getNavItemsForRole(role);
+  const sections = sectionsFor(items);
+
+  // §24/§25 — employees also get a Profile row, which is their identity
+  // surface (the drawer renders it in the user block as well).
+  const employeeProfile: NavItem[] =
+    role === "EMPLOYEE"
+      ? [{ label: "Profile", href: "/profile", icon: User }]
+      : [];
 
   return {
-    desktop: EMPLOYEE_NAV,
-    mobile: EMPLOYEE_MOBILE_NAV,
-    more: EMPLOYEE_MORE_ITEMS,
+    desktop: sections,
+    mobile: [...items, ...employeeProfile],
+    more: employeeProfile,
   };
 }
 
 export { MoreHorizontal };
+export { ALL_ITEMS };

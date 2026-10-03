@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, Search } from "lucide-react";
+import { Bell, Menu, Search } from "lucide-react";
 import { useNotifications } from "@/components/providers/notifications-provider";
 import { cn } from "@/lib/utils";
 
@@ -21,9 +21,24 @@ const TITLES: Array<{ match: (p: string) => boolean; title: string }> = [
   { match: (p) => p === "/notifications", title: "Notifications" },
   { match: (p) => p === "/settings", title: "Settings" },
   { match: (p) => p === "/profile", title: "Profile" },
+  { match: (p) => p === "/calendar", title: "Calendar" },
 ];
 
-export function MobileHeader() {
+/** Shared hamburger so the drawer opens identically everywhere. */
+export function MenuButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label="Open navigation menu"
+      onClick={onClick}
+      className="-ml-2 flex size-10 shrink-0 items-center justify-center rounded-full text-foreground transition-colors hover:bg-accent"
+    >
+      <Menu className="size-5" strokeWidth={1.8} />
+    </button>
+  );
+}
+
+export function MobileHeader({ onMenuClick }: { onMenuClick: () => void }) {
   const pathname = usePathname();
   const { unreadCount } = useNotifications();
 
@@ -38,11 +53,18 @@ export function MobileHeader() {
 
   return (
     <header
-      className="sticky top-0 z-30 flex h-14 items-center justify-between border-b bg-background/95 px-4 backdrop-blur lg:hidden"
+      className="sticky top-0 z-30 flex h-14 items-center justify-between gap-2 border-b bg-background/95 px-4 backdrop-blur lg:hidden"
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >
-      <h1 className="text-base font-semibold tracking-tight">{title}</h1>
-      <div className="flex items-center gap-1">
+      <div className="flex min-w-0 items-center gap-1">
+        <MenuButton onClick={onMenuClick} />
+        {/* Truncates rather than pushing the right-hand icons off-screen
+            on a narrow phone. */}
+        <h1 className="truncate text-base font-semibold tracking-tight">
+          {title}
+        </h1>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
         {/* §1/§21 — mobile search entry point (opens the shared dialog) */}
         <button
           type="button"

@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { CheckSquare, FolderKanban, Building2, IndianRupee, Plus } from "lucide-react";
 import {
   DropdownMenu,
@@ -59,37 +58,5 @@ export function QuickCreate() {
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-/**
- * Mobile FAB — fixed above the bottom nav on small screens.
- * Hidden on detail pages where a sticky action bar already occupies
- * the same corner (§19 — no sticky-element collisions).
- */
-export function MobileQuickCreate() {
-  const { role } = useSession();
-  const pathname = usePathname();
-  const isAdmin = role === "SUPER_ADMIN";
-  if (!isAdmin) return null;
-
-  // Task detail / project detail render their own sticky bottom bars.
-  const onDetailPage =
-    /^\/tasks\/[^/]+/.test(pathname) ||
-    /^\/projects\/[^/]+/.test(pathname);
-  if (onDetailPage) return null;
-
-  return (
-    <Link
-      href="/tasks/new"
-      aria-label="Create task"
-      className={cn(
-        buttonVariants({ size: "icon" }),
-        "fixed bottom-20 right-4 z-40 size-12 rounded-full shadow-lg lg:hidden"
-      )}
-      style={{ marginBottom: "env(safe-area-inset-bottom)" }}
-    >
-      <Plus className="size-5" />
-    </Link>
   );
 }

@@ -7,6 +7,7 @@ import {
   REMINDER_BODIES,
   type Horizon,
 } from "../lib/cron/deadline-horizon.ts";
+import { getNavForRole, getNavItemsForRole } from "../lib/navigation.ts";
 
 /**
  * §71 — Google Calendar sync + Web Push.
@@ -461,11 +462,18 @@ describe("/calendar page", () => {
     assert.doesNotMatch(src, /SUPER_ADMIN|ADMIN|EMPLOYEE/);
   });
 
-  test("the sidebar links to it for both admin and employee", () => {
-    const nav = read("../lib/navigation.ts");
-    const occurrences = nav.match(/href: "\/calendar"/g) ?? [];
-    assert.ok(occurrences.length >= 2, "both nav groups need a Calendar entry");
-    assert.match(nav, /CalendarDays/);
+  test("Calendar is reachable by every role, sidebar and drawer alike", () => {
+    // Asserted behaviourally against getNavForRole rather than by counting
+    // literals in the source: the nav config is now a single list, so a
+    // second "/calendar" string no longer exists to count — and counting
+    // strings could never have caught a role being filtered out.
+    for (const role of ["SUPER_ADMIN", "MANAGER", "EMPLOYEE"] as const) {
+      const { desktop, mobile } = getNavForRole(role);
+      const desktopHrefs = desktop.flatMap((s) => s.items).map((i) => i.href);
+      const mobileHrefs = mobile.map((i) => i.href);
+      assert.ok(desktopHrefs.includes("/calendar"), `${role} sidebar /calendar`);
+      assert.ok(mobileHrefs.includes("/calendar"), `${role} drawer /calendar`);
+    }
   });
 
   test("/profile no longer offers Google Calendar anywhere", () => {
