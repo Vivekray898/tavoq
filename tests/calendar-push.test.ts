@@ -134,6 +134,99 @@ describe("syncAssigneeCalendar", () => {
   });
 });
 
+describe("a revoked Google grant fails cleanly instead of erroring forever", () => {
+  const gcal = () => strip(read("../lib/actions/google-calendar.ts"));
+
+  test("a permanently invalid refresh token clears the token row", () => {
+    const src = gcal();
+    assert.match(src, /PERMANENT_TOKEN_ERRORS/);
+    assert.match(src, /invalid_grant/);
+    // The dead row must be DELETED, or the UI keeps claiming the
+    // calendar is connected and every sync fails the same way forever.
+    const revoked = src.slice(src.indexOf("PERMANENT_TOKEN_ERRORS.has(json.error)"));
+    const del = revoked.slice(0, 600);
+    assert.match(del, /user_google_tokens/);
+    assert.match(del, /\.delete\(\)/);
+  });
+
+  test("permanent errors are distinguished from a transient Google outage", () => {
+    // A network blip must NOT disconnect the user.
+    const src = gcal();
+    assert.match(
+      src,
+      /"invalid_grant",[\s\S]*?"invalid_client",[\s\S]*?"unauthorized_client"/
+    );
+  });
+
+  test("fullSyncForUser RETURNS on a revoked grant rather than throwing", () => {
+    // Three callers, two outside any try block. Throwing here was the bug.
+    const src = gcal();
+    const body = src.slice(
+      src.indexOf("async function fullSyncForUser"),
+      src.indexOf("async function fullSyncForUser") + 1400
+    );
+    assert.match(body, /if \(err instanceof GoogleAuthRevokedError\)/);
+    assert.match(body, /return \{ success: false, error: err\.message \}/);
+  });
+
+  test("every getAccessToken call site sits inside a try", () => {
+    // Regression guard: the original crash was an unguarded call whose
+    // throw escaped as a 500. Checked per enclosing FUNCTION rather than
+    // by line proximity, because a try may legitimately be far above.
+    const src = gcal();
+    const lines = src.split("\n");
+    const offenders: string[] = [];
+    let fnName = "(top level)";
+    let fnStart = 0;
+
+    lines.forEach((line, i) => {
+      const fn = line.match(/^(?:export )?(?:async )?function (\w+)/);
+      if (fn) {
+        fnName = fn[1];
+        fnStart = i;
+      }
+      if (!/getAccessToken\(/.test(line)) return;
+      if (line.match(/^async function getAccessToken/)) return; // the definition
+      // Look for a try between the start of this function and the call.
+      const body = lines.slice(fnStart, i).join("\n");
+      if (!/\btry \{/.test(body)) offenders.push(`${fnName}:${i + 1}`);
+    });
+
+    assert.deepEqual(
+      offenders,
+      [],
+      `getAccessToken called with no enclosing try in: ${offenders.join(", ")}`
+    );
+  });
+
+  test("a Google failure is never reported as Unauthorized", () => {
+    // The bug: a revoked grant surfaced as "Unauthorized", sending the
+    // user to the login page for a problem login cannot fix.
+    const src = gcal();
+    const fn = src.slice(
+      src.indexOf("export async function syncAllTasksToCalendar"),
+      src.indexOf("async function fullSyncForUser")
+    );
+    // The auth catch legitimately returns "Unauthorized". What must NOT
+    // happen is the SYNC catch doing the same, so assert on the second
+    // try/catch pair specifically.
+    const syncCatch = fn.slice(fn.indexOf("catch (err)"));
+    assert.doesNotMatch(syncCatch, /error: "Unauthorized"/);
+    assert.match(fn, /GoogleAuthRevokedError/);
+  });
+
+  test("only requireAuth failures produce Unauthorized", () => {
+    const src = gcal();
+    const fn = src.slice(
+      src.indexOf("export async function syncAllTasksToCalendar"),
+      src.indexOf("async function fullSyncForUser")
+    );
+    // auth is isolated in its own try, sync in a second one
+    assert.match(fn, /requireAuth\(\)[\s\S]*?userId = profile\.id/);
+    assert.match(fn, /return \{ success: false, error: "Unauthorized" \}/);
+  });
+});
+
 describe("task mutations trigger calendar sync", () => {
   const src = () => strip(read("../lib/actions/tasks.ts"));
 

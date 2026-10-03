@@ -101,6 +101,36 @@ interface GoogleTokenResponse {
   error_description?: string;
 }
 
+/**
+ * The stored refresh token is permanently dead: the user revoked the grant
+ * in Google, the testing-mode refresh window lapsed, or the OAuth client
+ * secret changed. No amount of retrying fixes this, so it is distinguished
+ * from a transient Google outage and handled by DROPPING THE ROW, which
+ * returns the user to "not connected" and lets them reconnect.
+ *
+ * Without this, a revoked token fails on every sync forever and the UI
+ * keeps claiming the calendar is connected.
+ */
+class GoogleAuthRevokedError extends Error {
+  constructor() {
+    super(
+      "Google Calendar access was revoked or expired. Please reconnect your calendar."
+    );
+    this.name = "GoogleAuthRevokedError";
+  }
+}
+
+/**
+ * OAuth error codes that mean "this grant will never work again", as
+ * opposed to a network blip or Google being briefly unavailable. Retrying
+ * the former is pointless and hides the real problem from the user.
+ */
+const PERMANENT_TOKEN_ERRORS = new Set([
+  "invalid_grant",
+  "invalid_client",
+  "unauthorized_client",
+]);
+
 async function postToken(body: Record<string, string>): Promise<GoogleTokenResponse> {
   const res = await fetch(TOKEN_ENDPOINT, {
     method: "POST",
@@ -150,6 +180,20 @@ async function getAccessToken(row: GoogleTokenRow): Promise<TokenBundle> {
 
 
   if (!json.access_token) {
+    // A dead grant must not be retried forever: drop the row so the user
+    // is told to reconnect and the next sync is a clean "not connected".
+    if (json.error && PERMANENT_TOKEN_ERRORS.has(json.error)) {
+      await createAdminClient()
+        .from("user_google_tokens")
+        .delete()
+        .eq("id", row.id);
+      console.error(
+        "[google] refresh token permanently invalid, row cleared",
+        row.id,
+        json.error
+      );
+      throw new GoogleAuthRevokedError();
+    }
     throw new Error(
       json.error_description || json.error || "Couldn't refresh the Google access token"
     );
@@ -535,11 +579,28 @@ export async function syncTaskToCalendar(
  * itself is left alone — the user may have edited it deliberately).
  */
 export async function syncAllTasksToCalendar(): Promise<ActionResponse<SyncResult>> {
+  // requireAuth is separated from the sync so a Google-side failure is
+  // NOT reported as "Unauthorized" — the user is signed in fine, and
+  // telling them otherwise sends them to the login page for no reason.
+  let userId: string;
   try {
     const profile = await requireAuth();
-    return fullSyncForUser(profile.id);
+    userId = profile.id;
   } catch {
     return { success: false, error: "Unauthorized" };
+  }
+
+  try {
+    return await fullSyncForUser(userId);
+  } catch (err) {
+    if (err instanceof GoogleAuthRevokedError) {
+      return { success: false, error: err.message };
+    }
+    console.error("[google] syncAllTasksToCalendar", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Calendar sync failed",
+    };
   }
 }
 
@@ -558,7 +619,24 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
     return { success: false, error: "Connect Google Calendar first" };
   }
 
-  const { accessToken } = await getAccessToken(row);
+  // Returning rather than throwing: this function is called from three
+  // places, two of which sit outside any try block (the no-cursor path
+  // and the syncToken-410 fallback). A revoked grant therefore has to be
+  // an ActionResponse, not an exception, or it escapes as a 500.
+  let accessToken: string;
+  try {
+    ({ accessToken } = await getAccessToken(row));
+  } catch (err) {
+    if (err instanceof GoogleAuthRevokedError) {
+      return { success: false, error: err.message };
+    }
+    console.error("[google] fullSyncForUser token", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Calendar sync failed",
+    };
+  }
+
   const base = `${CALENDAR_API}/calendars/${encodeURIComponent(row.calendar_id)}/events`;
 
   // Prime a fresh cursor so the next incremental sync has a baseline.
@@ -710,7 +788,23 @@ export async function incrementalSyncForUser(
     return fullSyncForUser(userId);
   }
 
-  const { accessToken } = await getAccessToken(row);
+  // Minting the token sits OUTSIDE the try below, so it needs its own
+  // guard: a revoked grant throws here, and an uncaught throw from a
+  // server action becomes a 500 the user sees as a raw error page.
+  let accessToken: string;
+  try {
+    ({ accessToken } = await getAccessToken(row));
+  } catch (err) {
+    if (err instanceof GoogleAuthRevokedError) {
+      return { success: false, error: err.message };
+    }
+    console.error("[google] incrementalSyncForUser token", err);
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Incremental sync failed",
+    };
+  }
+
   const result: SyncResult = { ...empty, errors: [] };
 
   try {
@@ -948,7 +1042,16 @@ async function syncSingleTaskForUser(
   // separate full-sync for the previous assignee.
   if (!task) return;
 
-  const { accessToken } = await getAccessToken(row);
+  // Guarded locally rather than relying on the caller. syncAssigneeCalendar
+  // does wrap this today, but a future caller need not, and a revoked grant
+  // escaping here would turn a successful task save into a 500.
+  let accessToken: string;
+  try {
+    ({ accessToken } = await getAccessToken(row));
+  } catch (err) {
+    console.error("[google] syncSingleTaskForUser token", err);
+    return;
+  }
   const base = `${CALENDAR_API}/calendars/${encodeURIComponent(row.calendar_id)}/events`;
 
   // Completed work leaves the calendar.
