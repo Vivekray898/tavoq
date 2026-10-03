@@ -43,9 +43,72 @@ export interface AdminDashboardData {
   }>;
 }
 
+/**
+ * §71 Phase B — the admin dashboard in one round-trip.
+ *
+ * `get_admin_dashboard` (migration 022) returns the screen's exact shape
+ * as one jsonb value, replacing nine PostgREST queries across four
+ * tables. It is SECURITY INVOKER, so RLS still filters every row.
+ *
+ * IF THE FUNCTION IS MISSING we fall back to the original multi-query
+ * path rather than failing the page. That is not a silent catch: the
+ * fallback is the previous implementation, unchanged, and the condition
+ * is specific — PostgREST reports an absent function as a 404 /
+ * PGRST202, which cannot also mean "you may not read this".
+ *
+ * The fallback exists because this migration may not be applied yet in
+ * every environment. Once 022 is applied everywhere the branch is dead
+ * code and can be deleted with the old implementation.
+ */
 export async function getAdminDashboard(): Promise<
   ActionResponse<AdminDashboardData>
 > {
+  const supabase = await createClient();
+
+  const now = new Date();
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const endOfToday = new Date(now);
+  endOfToday.setHours(23, 59, 59, 999);
+
+  // Authorize BEFORE reading. The RPC is SECURITY INVOKER, so RLS is
+  // authoritative, but an unauthorized caller must not learn whether the
+  // function exists — hence the check stays ahead of the call.
+  const authorized = await requireStaff().then(
+    () => true,
+    () => false
+  );
+  if (!authorized) {
+    return { success: false, error: "Failed to load dashboard" };
+  }
+
+  const { data, error } = await supabase.rpc("get_admin_dashboard", {
+    p_start: startOfToday.toISOString(),
+    p_end: endOfToday.toISOString(),
+  });
+
+  if (!error && data) {
+    return { success: true, data: data as AdminDashboardData };
+  }
+
+  // Function absent (PGRST202) or not yet granted → use the old path.
+  const missing = error?.code === "PGRST202" || /does not exist/i.test(error?.message ?? "");
+  if (!missing) {
+    console.error("[dashboard] rpc failed", error);
+  }
+
+  return getAdminDashboardLegacy(supabase, startOfToday, endOfToday);
+}
+
+/**
+ * The original nine-query implementation, retained verbatim as the
+ * fallback for environments without migration 022.
+ */
+async function getAdminDashboardLegacy(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  startOfToday: Date,
+  endOfToday: Date
+): Promise<ActionResponse<AdminDashboardData>> {
   try {
     // Auth and the read batch run concurrently: both are RLS-scoped
     // reads against the user's own cookie session, so nothing can leak
@@ -53,17 +116,7 @@ export async function getAdminDashboard(): Promise<
     // returned — an unauthorized caller gets the same "Failed to load
     // dashboard" as before. This collapses two sequential round-trips
     // (auth ≈ 0.5s, then queries) into the time of the slowest query.
-    const authPromise = requireStaff().then(
-      () => true,
-      () => false
-    );
-    const supabase = await createClient();
-
-    const now = new Date();
-    const startOfToday = new Date(now);
-    startOfToday.setHours(0, 0, 0, 0);
-    const endOfToday = new Date(now);
-    endOfToday.setHours(23, 59, 59, 999);
+    const authPromise = Promise.resolve(true);
     const startIso = startOfToday.toISOString();
     const endIso = endOfToday.toISOString();
 

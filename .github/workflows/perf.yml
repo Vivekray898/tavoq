@@ -1,0 +1,59 @@
+name: perf
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  budgets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Static budgets
+        # Runs without a browser: initial-JS ceiling + shell query fan-out.
+        run: pnpm verify:perf
+
+      - name: Typecheck / lint / tests
+        run: |
+          pnpm typecheck
+          pnpm lint
+          pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Performance budgets (Fast 4G)
+        # Measures a real production build under throttled network + CPU
+        # and fails the job if FCP/LCP/CLS or the request count regress
+        # against perf/baseline.json.
+        run: pnpm perf:check
+
+      - name: Upload baseline on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline
+          path: |
+            perf/baseline.json
+            .next/
+          retention-days: 7

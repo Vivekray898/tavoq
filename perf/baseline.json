@@ -1,0 +1,101 @@
+{
+  "budgets": {
+    "maxBlockingRequests": 14,
+    "maxDecodedJsKb": 900,
+    "fast4g": {
+      "maxFcp": 1200,
+      "maxLcp": 2000,
+      "maxCls": 0.1,
+      "maxRequests": 25
+    },
+    "slow4g": {
+      "maxFcp": 3000,
+      "maxLcp": 4000,
+      "maxCls": 0.1,
+      "maxRequests": 30
+    }
+  },
+  "capturedAt": "2026-10-03T08:54:36.415Z",
+  "results": [
+    {
+      "path": "/login",
+      "profile": "fast4g",
+      "status": 200,
+      "wallClockMs": 1167,
+      "ttfb": 87.79999999888241,
+      "fcp": 240,
+      "lcp": 240,
+      "cls": 0,
+      "domContentLoaded": 209.09999999962747,
+      "load": 399.69999999925494,
+      "resourceCount": 17,
+      "transferKb": 314.3349609375,
+      "decodedKb": 992.828125,
+      "decodedJsKb": 799.4716796875,
+      "scriptCount": 12,
+      "blockingScripts": 14,
+      "totalRequests": 18,
+      "supabaseRequests": 0
+    },
+    {
+      "path": "/signup",
+      "profile": "fast4g",
+      "status": 200,
+      "wallClockMs": 1125,
+      "ttfb": 5.300000000745058,
+      "fcp": 200,
+      "lcp": 200,
+      "cls": 0,
+      "domContentLoaded": 167.5,
+      "load": 360,
+      "resourceCount": 17,
+      "transferKb": 314.1943359375,
+      "decodedKb": 992.283203125,
+      "decodedJsKb": 798.9267578125,
+      "scriptCount": 12,
+      "blockingScripts": 14,
+      "totalRequests": 18,
+      "supabaseRequests": 0
+    },
+    {
+      "path": "/login",
+      "profile": "slow4g",
+      "status": 200,
+      "wallClockMs": 2687,
+      "ttfb": 8.199999999254942,
+      "fcp": 964,
+      "lcp": 964,
+      "cls": 0,
+      "domContentLoaded": 849.5999999996275,
+      "load": 1927.5,
+      "resourceCount": 17,
+      "transferKb": 314.3349609375,
+      "decodedKb": 992.828125,
+      "decodedJsKb": 799.4716796875,
+      "scriptCount": 12,
+      "blockingScripts": 14,
+      "totalRequests": 18,
+      "supabaseRequests": 0
+    },
+    {
+      "path": "/signup",
+      "profile": "slow4g",
+      "status": 200,
+      "wallClockMs": 2703,
+      "ttfb": 3.5,
+      "fcp": 980,
+      "lcp": 980,
+      "cls": 0,
+      "domContentLoaded": 863,
+      "load": 1944,
+      "resourceCount": 17,
+      "transferKb": 314.1943359375,
+      "decodedKb": 992.283203125,
+      "decodedJsKb": 798.9267578125,
+      "scriptCount": 12,
+      "blockingScripts": 14,
+      "totalRequests": 18,
+      "supabaseRequests": 0
+    }
+  ]
+}

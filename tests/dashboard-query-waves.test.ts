@@ -28,8 +28,23 @@ function bodyOf(name: string): string {
   return code.slice(start, code.indexOf("\n}", start));
 }
 
-const admin = bodyOf("getAdminDashboard");
 const employee = bodyOf("getEmployeeDashboard");
+
+/**
+ * The admin dashboard now reads through one RPC (migration 022), so the
+ * nine-query shape it used to have lives on in getAdminDashboardLegacy,
+ * which runs only when that function is not installed. The properties
+ * below — no query issued after the batch resolves, every table in the
+ * single batch — still matter for that path, so the assertions are
+ * retargeted at it rather than deleted.
+ */
+function bodyOfLegacy(): string {
+  const start = code.indexOf("async function getAdminDashboardLegacy");
+  assert.ok(start > -1, "getAdminDashboardLegacy not found");
+  return code.slice(start, code.indexOf("\n}", start));
+}
+
+const admin = bodyOfLegacy();
 
 /**
  * The batch span: from `await Promise.all([` to the `]);` that closes
@@ -104,8 +119,11 @@ describe("employee dashboard", () => {
 
 describe("staff gate (unchanged by the parallelisation)", () => {
   it("still requires staff before returning admin data", () => {
-    assert.match(admin, /requireStaff\(\)/);
-    assert.match(admin, /if \(!isAuthorized\)/);
+    // requireStaff moved into the exported entry point when the RPC was
+    // introduced; it must still run before any row is read.
+    const entry = bodyOf("getAdminDashboard");
+    assert.match(entry, /requireStaff\(\)/);
+    assert.match(entry, /if \(!authorized\)/);
   });
 
   it("still re-checks authorization before returning", () => {
