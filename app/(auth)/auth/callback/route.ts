@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { getAccountDestination } from "@/lib/permissions";
 
 /**
  * OAuth callback. Routes strictly by the profile's SERVER-SIDE
@@ -7,8 +8,8 @@ import { createClient } from "@/lib/supabase/server";
  *
  *   SUSPENDED            → /suspended (blocked)
  *   PENDING / no profile / no role → /pending (blocked)
- *   ADMIN                → /admin
- *   EMPLOYEE             → / (employee workspace)
+ *   SUPER_ADMIN          → /admin
+ *   MANAGER / EMPLOYEE   → / (workspace)
  *
  * If the sign-in started from an invitation, we bounce back to the
  * invite page (with the token) so it can accept server-side after
@@ -40,16 +41,12 @@ export async function GET(request: Request) {
           .eq("id", user.id)
           .single();
 
-        if (!profile || profile.status === "PENDING" || !profile.role) {
-          return NextResponse.redirect(`${origin}/pending`);
-        }
-        if (profile.status === "SUSPENDED") {
-          return NextResponse.redirect(`${origin}/suspended`);
-        }
-        if (profile.role === "SUPER_ADMIN") {
-          return NextResponse.redirect(`${origin}/admin`);
-        }
-        return NextResponse.redirect(`${origin}/`);
+        // Same routing table the /login page uses. Keeping one
+        // implementation is what stops the two from disagreeing and
+        // re-opening the redirect loop.
+        return NextResponse.redirect(
+          `${origin}${getAccountDestination(profile ?? null)}`,
+        );
       }
     } else {
       // Common OAuth failure: e.g. "email already registered" when a

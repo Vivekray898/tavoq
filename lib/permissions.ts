@@ -303,6 +303,33 @@ export function canChangeTaskStatus(
   return actorId != null && task.assignedTo === actorId;
 }
 
+/**
+ * Where a signed-in account belongs, from its status and role.
+ *
+ * Single source of truth for post-sign-in routing: the OAuth callback
+ * and the /login page both call this, so the two can never disagree.
+ * That disagreement is what produced the redirect loop — the callback
+ * sent a signed-in user to one place, /login re-offered "Continue with
+ * Google", the callback failed for the same reason, and the pair
+ * bounced indefinitely.
+ *
+ *   no profile / null role / not ACTIVE → /pending
+ *   SUSPENDED                           → /suspended
+ *   SUPER_ADMIN                         → /admin
+ *   MANAGER / EMPLOYEE                  → /
+ *
+ * `/login` is never a destination: an authenticated user who lands there
+ * must be routed somewhere that explains their state.
+ */
+export function getAccountDestination(
+  profile: { status?: string | null; role?: string | null } | null | undefined,
+): string {
+  if (!profile) return "/pending";
+  if (profile.status === "SUSPENDED") return "/suspended";
+  if (profile.status !== "ACTIVE" || !profile.role) return "/pending";
+  return profile.role === "SUPER_ADMIN" ? "/admin" : "/";
+}
+
 /** Display labels for the UI. */
 export const ROLE_LABELS: Record<UserRole, string> = {
   SUPER_ADMIN: "Super Admin",

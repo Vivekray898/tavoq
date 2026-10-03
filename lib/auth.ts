@@ -84,6 +84,33 @@ export const getUserProfile = cache(async (): Promise<Profile | null> => {
 });
 
 /**
+ * The signed-in user's ID, or null when there is no session.
+ *
+ * Deliberately reads ONLY the session — never `profiles`. This is the
+ * signal that separates "you are not signed in" (the only state that
+ * belongs on /login) from "you are signed in but your profile row is
+ * unreadable". Collapsing those two into one /login redirect is what
+ * produced the post-OAuth redirect loop: the user was already signed in,
+ * so /login re-offered "Continue with Google", the callback failed for
+ * the same reason, and the pair bounced forever.
+ */
+export async function getSessionUserId(): Promise<string | null> {
+  const supabase = await createClient();
+
+  const { data: claimsData, error: claimsError } = await supabase.auth.getClaims();
+  if (!claimsError && claimsData?.claims?.sub) {
+    return claimsData.claims.sub as string;
+  }
+
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+  if (authError || !user) return null;
+  return user.id;
+}
+
+/**
  * Get the current user ID.
  * Returns null if not authenticated.
  */
