@@ -87,12 +87,16 @@ export function CalendarView() {
     setWorking("sync");
     const res = await syncAllTasksToCalendar();
     setWorking(null);
+    // Invalidate on BOTH outcomes. A revoked grant makes the server
+    // delete the token row, so the cached status is now wrong — keeping
+    // it would keep showing "connected" and hide the dashboard banner
+    // that would otherwise prompt a reconnect.
+    void queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
     if (res.success && res.data) {
       const { created, updated, removed } = res.data;
       toast.success(
         `Calendar up to date — ${created} added, ${updated} updated, ${removed} removed`
       );
-      void queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
     } else {
       toast.error(res.error ?? "Sync failed");
     }

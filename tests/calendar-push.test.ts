@@ -227,6 +227,37 @@ describe("a revoked Google grant fails cleanly instead of erroring forever", () 
   });
 });
 
+describe("a failed sync refreshes the connection status", () => {
+  test("handleSync invalidates the cache on success AND failure", () => {
+    // A revoked grant makes the server delete the token row. If the
+    // status query is not invalidated on failure, the UI keeps showing
+    // "connected" and the reconnect banner stays hidden.
+    const src = strip(read("../components/calendar/calendar-view.tsx"));
+    const fn = src.slice(
+      src.indexOf("async function handleSync"),
+      src.indexOf("async function handleDisconnect")
+    );
+    const invalidation = fn.indexOf("invalidateQueries");
+    assert.ok(invalidation > -1, "handleSync must invalidate the status query");
+    assert.ok(
+      invalidation < fn.indexOf("if (res.success"),
+      "invalidate before branching, so failures invalidate too"
+    );
+  });
+
+  test("a cleared token row reports connected: false", () => {
+    // The chain that makes the banner reappear: revoked -> row deleted
+    // -> no row -> not connected -> banner shows.
+    const src = strip(read("../lib/actions/google-calendar.ts"));
+    const fn = src.slice(
+      src.indexOf("export async function getGoogleCalendarStatus"),
+      src.indexOf("export async function disconnectGoogleCalendar")
+    );
+    assert.match(fn, /loadTokenRow\(profile\.id\)/);
+    assert.match(fn, /if \(!row\) \{[\s\S]*?connected: false/);
+  });
+});
+
 describe("task mutations trigger calendar sync", () => {
   const src = () => strip(read("../lib/actions/tasks.ts"));
 
