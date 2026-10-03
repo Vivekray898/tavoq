@@ -33,8 +33,11 @@ import {
   Pencil,
   Plus,
   Search,
+  Scale,
   SlidersHorizontal,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -106,13 +109,20 @@ import { PaymentStatusBadge } from "@/components/shared/status-badge";
 import { EntityAvatar } from "@/components/shared/entity-avatar";
 import {
   createCustomPayment,
+  createPaymentAdjustment,
   createPaymentFromTasks,
   markPaymentPaid,
   markPaymentsPaidBatch,
   updatePaymentNote,
-  type PaymentItem,
   type PaymentWorkspaceData,
 } from "@/lib/actions/payments";
+import {
+  applyAdjustmentToItem,
+  recomputeSummary,
+  type PaymentItem,
+} from "@/lib/payments/adjustments";
+import { isStaff } from "@/lib/permissions";
+import { useSession } from "@/components/providers/session-provider";
 import {
   paymentWorkspaceOptions,
   payableTasksOptions,
@@ -141,15 +151,53 @@ type SortKey = "NEWEST" | "OLDEST" | "AMOUNT_DESC" | "AMOUNT_ASC";
 type WorkspaceTab = "payments" | "pending" | "paid" | "employees";
 
 /** Task payout vs custom payment — always explicit. */
-function PaymentKindBadge({ kind }: { kind: PaymentItem["kind"] }) {
+function PaymentKindBadge({
+  kind,
+  adjusted = false,
+}: {
+  kind: PaymentItem["kind"];
+  adjusted?: boolean;
+}) {
+  const label = kind === "TASK" ? "Task payout" : "Custom";
   return kind === "TASK" ? (
-    <Badge variant="outline" className="gap-1 font-medium">
-      <Banknote className="size-3" /> Task payout
+    <Badge
+      variant="outline"
+      className={cn("gap-1 font-medium", adjusted && "border-blue-500/40 text-blue-700 dark:text-blue-400")}
+    >
+      <Banknote className="size-3" />
+      {label}
+      {adjusted ? " + adj" : null}
     </Badge>
   ) : (
     <Badge variant="outline" className="gap-1 font-medium text-muted-foreground">
-      <Sparkles className="size-3" /> Custom
+      <Sparkles className="size-3" /> {label}
+      {adjusted ? " + adj" : null}
     </Badge>
+  );
+}
+
+/**
+ * Secondary line under an amount that carries adjustments.
+ *
+ * One adjustment reads as its own effect ("+₹200 bonus"); two or more
+ * collapse to the net delta, because listing every line makes a dense
+ * row unreadable while the detail sheet keeps the full trail.
+ */
+function AdjustmentHint({ item }: { item: PaymentItem }) {
+  if (!item.adjustments?.length) return null;
+  const total = item.adjustment_total;
+  const bonus = total > 0;
+  return (
+    <span
+      className={cn(
+        "block text-[11px] font-medium tabular-nums",
+        bonus ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"
+      )}
+    >
+      {bonus ? "+" : "−"}
+      {formatCurrency(Math.abs(total))} {bonus ? "bonus" : "deduction"}
+      {item.adjustments.length > 1 ? " (net)" : ""}
+    </span>
   );
 }
 
@@ -273,6 +321,25 @@ export function AdminPaymentsView() {
   const [noteDraft, setNoteDraft] = useState("");
   const [noteSaving, setNoteSaving] = useState(false);
 
+  // ── Adjustment dialog (bonus / deduction on a PAID row) ──
+  const [adjustFor, setAdjustFor] = useState<string | null>(null);
+  const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustReason, setAdjustReason] = useState("");
+  const [adjustSaving, setAdjustSaving] = useState(false);
+
+  // ────────────────────────────────────────────
+  // Role gate.
+  //
+  // The page is already server-guarded to staff, and every action here
+  // re-checks via requireStaff() server-side — the RLS policy "Active
+  // staff manages payments" (migration 014) grants BOTH super admins and
+  // managers. This gate exists so a viewer is never shown a control the
+  // database would refuse, and so the workspace is genuinely first-class
+  // for managers rather than super-admin-only.
+  // ────────────────────────────────────────────
+  const { role } = useSession();
+  const canManagePayments = isStaff(role);
+
   // ── Employees tab detail sheet ──
   const [employeeSheetId, setEmployeeSheetId] = useState<string | null>(null);
   const employeeDetailQuery = useQuery({
@@ -370,6 +437,78 @@ export function AdminPaymentsView() {
           }
         : prev
     );
+  }
+
+  // ── Adjustments (§71) ────────────────────────
+  //
+  // A bonus or deduction is a NEW ledger row against an already-paid
+  // payment, never a mutation of it. The client applies the same fold
+  // the server would (applyAdjustmentToItem) so the row updates in
+  // place; a failure restores the snapshot rather than leaving a
+  // phantom amount on screen.
+  const adjustmentTarget = adjustFor
+    ? (history.find((p) => p.id === adjustFor) ?? null)
+    : null;
+
+  function openAdjustment(payment: PaymentItem) {
+    setAdjustFor(payment.id);
+    setAdjustAmount("");
+    setAdjustReason("");
+  }
+
+  function closeAdjustment() {
+    setAdjustFor(null);
+    setAdjustAmount("");
+    setAdjustReason("");
+  }
+
+  /** Signed amount currently typed, or null when not a usable number. */
+  const adjustParsed = adjustAmount.trim() === "" ? null : Number(adjustAmount);
+  const adjustValid = adjustParsed !== null && Number.isFinite(adjustParsed) && adjustParsed !== 0;
+  const adjustCanSave = adjustValid && adjustReason.trim().length > 0 && !adjustSaving;
+
+  async function submitAdjustment() {
+    if (!adjustmentTarget || !adjustValid || adjustReason.trim().length === 0) return;
+    setAdjustSaving(true);
+
+    const snapshot = queryClient.getQueryData<PaymentWorkspaceData>(
+      qk.paymentWorkspace()
+    );
+
+    const result = await createPaymentAdjustment({
+      parent_payment_id: adjustmentTarget.id,
+      amount: adjustParsed,
+      reason: adjustReason.trim(),
+    });
+
+    if (result.success) {
+      queryClient.setQueryData<PaymentWorkspaceData>(qk.paymentWorkspace(), (prev) => {
+        if (!prev) return prev;
+        const created = result.data!;
+        const history2 = prev.history.map((p) => {
+          if (p.id !== adjustmentTarget.id) return p;
+          // Fold server truth into the cached row: the adjustment the
+          // action just wrote, attributed to whoever recorded it.
+          return applyAdjustmentToItem(p, {
+            id: created.id,
+            amount: created.amount,
+            reason: adjustReason.trim(),
+            created_at: created.created_at ?? new Date().toISOString(),
+            actor_name: null,
+          });
+        });
+        // Every rollup in the workspace sums `amount`, so recomputing the
+        // summary from the patched history keeps the ERP strip and the
+        // per-employee figures correct without a refetch.
+        return { ...prev, history: history2, summary: recomputeSummary(history2) };
+      });
+      toast.success("Adjustment recorded");
+      closeAdjustment();
+    } else {
+      queryClient.setQueryData(qk.paymentWorkspace(), snapshot);
+      toast.error(result.error ?? "Couldn't record the adjustment");
+    }
+    setAdjustSaving(false);
   }
 
   async function handleMarkPaid(payment: PaymentItem) {
@@ -691,7 +830,7 @@ export function AdminPaymentsView() {
           <EmployeeCell name={p.employee_name} avatarUrl={avatarById.get(p.employee_id ?? "")} />
         </DataTableCell>
         <DataTableCell column="type">
-          <PaymentKindBadge kind={p.kind} />
+          <PaymentKindBadge kind={p.kind} adjusted={(p.adjustments?.length ?? 0) > 0} />
         </DataTableCell>
         <DataTableCell column="project" className="max-w-44">
           {p.project_name ? (
@@ -706,6 +845,7 @@ export function AdminPaymentsView() {
         </DataTableCell>
         <DataTableCell numeric className="font-semibold">
           {formatCurrency(p.amount)}
+          <AdjustmentHint item={p} />
         </DataTableCell>
         <DataTableCell>
           <PaymentStatusBadge status={p.status} withIcon />
@@ -730,9 +870,16 @@ export function AdminPaymentsView() {
               <DropdownMenuItem onClick={() => openDetail(p)}>
                 <Eye className="size-4" /> View details
               </DropdownMenuItem>
-              {p.status === "PENDING" && (
+              {canManagePayments && p.status === "PENDING" && (
                 <DropdownMenuItem onClick={() => void handleMarkPaid(p)}>
                   <CheckCheck className="size-4" /> Mark as paid
+                </DropdownMenuItem>
+              )}
+              {/* Adjustments apply only once the money has moved: a
+                  pending row is still editable before it is paid. */}
+              {canManagePayments && p.status === "PAID" && (
+                <DropdownMenuItem onClick={() => openAdjustment(p)}>
+                  <Scale className="size-4" /> Adjust paid amount
                 </DropdownMenuItem>
               )}
               {p.kind === "TASK" && p.task_id && (
@@ -800,6 +947,7 @@ export function AdminPaymentsView() {
           <div className="flex shrink-0 items-center gap-1.5">
             <div className="text-right">
               <p className="text-sm font-semibold tabular-nums">{formatCurrency(p.amount)}</p>
+              <AdjustmentHint item={p} />
               <div className="mt-0.5 flex justify-end">
                 <PaymentStatusBadge status={p.status} withIcon />
               </div>
@@ -815,9 +963,14 @@ export function AdminPaymentsView() {
                 <DropdownMenuItem onClick={() => openDetail(p)}>
                   <Eye className="size-4" /> View details
                 </DropdownMenuItem>
-                {p.status === "PENDING" && (
+                {canManagePayments && p.status === "PENDING" && (
                   <DropdownMenuItem onClick={() => void handleMarkPaid(p)}>
                     <CheckCheck className="size-4" /> Mark as paid
+                  </DropdownMenuItem>
+                )}
+                {canManagePayments && p.status === "PAID" && (
+                  <DropdownMenuItem onClick={() => openAdjustment(p)}>
+                    <Scale className="size-4" /> Adjust paid amount
                   </DropdownMenuItem>
                 )}
                 {p.kind === "TASK" && p.task_id && (
@@ -843,9 +996,11 @@ export function AdminPaymentsView() {
         <span className="font-semibold tabular-nums">{formatCurrency(bulkTotal)}</span>
       </p>
       <div className="flex items-center gap-2">
-        <Button type="button" size="sm" onClick={() => setBulkConfirmOpen(true)}>
-          <CheckCheck className="size-4" /> Mark as paid
-        </Button>
+        {canManagePayments && (
+          <Button type="button" size="sm" onClick={() => setBulkConfirmOpen(true)}>
+            <CheckCheck className="size-4" /> Mark as paid
+          </Button>
+        )}
         <Button
           type="button"
           size="sm"
@@ -949,9 +1104,11 @@ export function AdminPaymentsView() {
             Manage employee payouts, task-based payments and custom payments.
           </p>
         </div>
-        <Button type="button" size="sm" onClick={() => openCreateSheet()}>
-          <Plus className="size-4" /> Create payment
-        </Button>
+        {canManagePayments && (
+          <Button type="button" size="sm" onClick={() => openCreateSheet()}>
+            <Plus className="size-4" /> Create payment
+          </Button>
+        )}
       </div>
 
       {/* ── Metrics strip ──────────────────────────────────── */}
@@ -1684,9 +1841,63 @@ export function AdminPaymentsView() {
                     <p className="mt-1 text-xs text-muted-foreground">
                       {detail.label}
                     </p>
+                    {detail.adjustments?.length ? (
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        Base {formatCurrency(detail.base_amount)}
+                      </p>
+                    ) : null}
                   </div>
                   <PaymentStatusBadge status={detail.status} />
                 </div>
+
+                {/* Adjustment trail — the append-only history of every
+                    bonus and deduction applied to this payment. */}
+                {detail.adjustments?.length ? (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      Adjustments ({detail.adjustments.length})
+                    </p>
+                    <div className="overflow-hidden rounded-lg border">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
+                          <tr>
+                            <th className="px-3 py-1.5 font-medium">When</th>
+                            <th className="px-3 py-1.5 font-medium">Reason</th>
+                            <th className="px-3 py-1.5 text-right font-medium">Amount</th>
+                            <th className="px-3 py-1.5 text-right font-medium">By</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {detail.adjustments.map((a) => (
+                            <tr key={a.id}>
+                              <td className="whitespace-nowrap px-3 py-1.5 text-xs text-muted-foreground">
+                                {formatDate(a.created_at)}
+                              </td>
+                              <td className="px-3 py-1.5">{a.reason}</td>
+                              <td
+                                className={cn(
+                                  "whitespace-nowrap px-3 py-1.5 text-right font-medium tabular-nums",
+                                  a.amount >= 0
+                                    ? "text-emerald-600 dark:text-emerald-400"
+                                    : "text-destructive"
+                                )}
+                              >
+                                {a.amount >= 0 ? "+" : "−"}
+                                {formatCurrency(Math.abs(a.amount))}
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-xs text-muted-foreground">
+                                {a.actor_name ?? "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-right text-sm font-semibold tabular-nums">
+                      Net: {formatCurrency(detail.amount)}
+                    </p>
+                  </div>
+                ) : null}
 
                 <dl className="space-y-3 rounded-lg border bg-card px-3.5 py-3 text-sm">
                   <div className="flex items-center justify-between gap-4">
@@ -1769,7 +1980,7 @@ export function AdminPaymentsView() {
                 </div>
               </div>
 
-              {detail.status === "PENDING" && (
+              {canManagePayments && detail.status === "PENDING" && (
                 <SheetFooter className="border-t">
                   <Button
                     type="button"
@@ -2089,6 +2300,121 @@ export function AdminPaymentsView() {
           </SheetFooter>
         </SheetContent>
       </Sheet>
+
+      {/* ── Adjustment dialog (§71) ──────────────────────
+          A bonus or a deduction on an already-paid payment. Recorded as
+          a new ledger row, never an edit of the original, so reversing
+          it means adding the opposite amount and the history stays
+          complete. */}
+      <Dialog open={!!adjustmentTarget} onOpenChange={(open) => !open && closeAdjustment()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Adjust paid amount</DialogTitle>
+            <DialogDescription>
+              {adjustmentTarget?.employee_name ?? "This employee"} was paid{" "}
+              {formatCurrency(adjustmentTarget?.base_amount ?? 0)} for this payment.
+              Record a bonus or a deduction — the original payment is never edited.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label htmlFor="adjust-amount" className="text-sm font-medium">
+                Amount
+              </label>
+              <Input
+                id="adjust-amount"
+                type="number"
+                inputMode="decimal"
+                step="any"
+                placeholder="500 or -50"
+                value={adjustAmount}
+                onChange={(e) => setAdjustAmount(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Positive is a bonus, negative is a deduction.
+              </p>
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {[100, 500, 1000, -100, -500].map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className="rounded-full border px-2.5 py-1 text-xs font-medium tabular-nums transition-colors hover:bg-muted"
+                    onClick={() => setAdjustAmount(String(v))}
+                  >
+                    {v > 0 ? `+${v}` : `−${Math.abs(v)}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label htmlFor="adjust-reason" className="text-sm font-medium">
+                Reason
+              </label>
+              <Input
+                id="adjust-reason"
+                placeholder="Diwali bonus, partial payment correction…"
+                value={adjustReason}
+                onChange={(e) => setAdjustReason(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Shown to the employee and kept on the payment record.
+              </p>
+            </div>
+
+            {/* Live preview — the whole point is that a deduction can
+                never be entered without seeing the amount fall. */}
+            {adjustmentTarget && adjustValid ? (
+              <div className="rounded-lg border bg-muted/30 px-3.5 py-2.5 text-sm">
+                <span className="text-muted-foreground">Net will change from </span>
+                <span className="font-medium tabular-nums">
+                  {formatCurrency(adjustmentTarget.amount)}
+                </span>
+                <span className="text-muted-foreground"> to </span>
+                <span
+                  className={cn(
+                    "font-semibold tabular-nums",
+                    adjustParsed! > 0
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : "text-destructive"
+                  )}
+                >
+                  {formatCurrency(adjustmentTarget.amount + adjustParsed!)}
+                </span>
+                <span
+                  className={cn(
+                    "ml-2 inline-flex items-center gap-1 text-xs font-medium",
+                    adjustParsed! > 0
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : "text-destructive"
+                  )}
+                >
+                  {adjustParsed! > 0 ? (
+                    <TrendingUp className="size-3.5" />
+                  ) : (
+                    <TrendingDown className="size-3.5" />
+                  )}
+                  {adjustParsed! > 0 ? "Bonus" : "Deduction"}
+                </span>
+              </div>
+            ) : null}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={closeAdjustment}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={!adjustCanSave}
+              onClick={() => void submitAdjustment()}
+            >
+              {adjustSaving ? "Saving…" : "Save adjustment"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

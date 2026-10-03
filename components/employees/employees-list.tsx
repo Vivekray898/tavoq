@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, Loader2, Mail, Send, Trash2, Users, X } from "lucide-react";
+import { Check, ChevronDown, Copy, Loader2, Mail, Send, Trash2, Users, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,6 +15,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -31,6 +38,7 @@ import {
   canManageProfile,
   invitableRoles,
   ROLE_LABELS,
+  ROLES,
 } from "@/lib/permissions";
 import type { UserRole } from "@/types/database";
 import {
@@ -42,7 +50,7 @@ import {
 import {
   teamMembersOptions,
 } from "@/lib/queries/options";
-import { formatDate, formatCurrency, cn } from "@/lib/utils";
+import { formatDate, formatCurrency, cn, roleBadgeClass, roleLabel } from "@/lib/utils";
 import { toast } from "sonner";
 
 type TeamTab = "ACTIVE" | "PENDING" | "SUSPENDED";
@@ -73,8 +81,26 @@ export function EmployeesList() {
   // manage_profile_lifecycle() RPC are the real authorization. These
   // predicates exist so a manager is not offered a button that would
   // be refused, and so a manager never sees actions on a peer.
-  const { role } = useSession();
+  const { role, userId } = useSession();
   const canChangeRoles = can(role, "profiles.changeRole");
+
+  /**
+   * A viewer may never act on their own row. manage_profile_lifecycle
+   * does not block this (a super admin can genuinely suspend their peer
+   * admin, and the "last active super admin" guard stops them from
+   * removing the final one), so the UI has to: self-suspend would lock
+   * the viewer out mid-session with no obvious way back.
+   */
+  const isSelf = (member: TeamMember) => member.id === userId;
+
+  /**
+   * The role dropdown is super-admin only (canChangeRoles), and offers
+   * all three enum values with the current one disabled. A binary
+   * "Make admin" toggle cannot express the middle tier — promoting
+   * someone to MANAGER was simply not reachable from this page.
+   */
+  const assignableRoles = (target: TeamMember): UserRole[] =>
+    ROLES.filter((r) => r !== target.role);
 
   /**
    * May this role act on a target with `targetRole`, granting
@@ -88,6 +114,8 @@ export function EmployeesList() {
   ) => canManageProfile(role, targetRole, action, requestedRole ?? null);
 
   const [tab, setTab] = useState<TeamTab>("ACTIVE");
+  /** Role sub-filter, Active tab only. "ALL" means no filter. */
+  const [roleFilter, setRoleFilter] = useState<UserRole | "ALL">("ALL");
   const [pendingAction, setPendingAction] = useState<{
     member: TeamMember;
     action: TeamAction;
@@ -98,8 +126,17 @@ export function EmployeesList() {
   const [inviteEmail, setInviteEmail] = useState("");
   // Which roles this actor may invite. A manager may only onboard
   // EMPLOYEE; a super admin may also invite MANAGER. SUPER_ADMIN is
-  // deliberately not offered — minting an org owner is done in the
-  // database, never through an invite link.
+  // deliberately not offered — minting an org owner is done from the
+  // member list, never through an invite link, so that granting full
+  // organization control is always a deliberate, auditable act on an
+  // account you can already see.
+  //
+  // invitableRoles(SUPER_ADMIN) includes SUPER_ADMIN (that helper is
+  // also used for ROLE_CHANGED, where the full set is correct), so the
+  // invite list is narrowed here rather than by changing the helper.
+  const inviteRoles: UserRole[] = invitableRoles(role).filter(
+    (r) => r !== "SUPER_ADMIN"
+  );
   const [inviteRole, setInviteRole] = useState<UserRole>("EMPLOYEE");
   const [inviting, setInviting] = useState(false);
   const [lastInviteUrl, setLastInviteUrl] = useState<string | null>(null);
@@ -158,7 +195,14 @@ export function EmployeesList() {
     toast.success("Team member updated");
   }
 
-  const visibleMembers = members.filter((member) => member.status === tab);
+  const visibleMembers = members.filter(
+    (member) =>
+      member.status === tab &&
+      // A pending row has no role yet, so filtering by a concrete role
+      // would hide the very rows that need approving. The filter is
+      // therefore applied on the Active tab only.
+      (tab !== "ACTIVE" || roleFilter === "ALL" || member.role === roleFilter)
+  );
   const actionLabel = pendingAction?.action === "APPROVE"
     ? "approve"
     : pendingAction?.action === "REACTIVATE"
@@ -168,6 +212,40 @@ export function EmployeesList() {
         : pendingAction?.action === "ROLE_CHANGED"
           ? "change role"
         : "suspend";
+
+  /**
+   * What the confirmation actually says will happen.
+   *
+   * A role change and an approval grant the same capability, so they
+   * share this copy. Granting SUPER_ADMIN is called out explicitly
+   * because it is the one action here that hands over control of the
+   * whole organization.
+   */
+  function confirmationCopy(): string {
+    if (!pendingAction) return "";
+    const { action, role: requestedRole } = pendingAction;
+    const granting = action === "APPROVE" || action === "ROLE_CHANGED";
+
+    if (granting && requestedRole) {
+      if (requestedRole === "SUPER_ADMIN") {
+        return "This grants full organization control, including the ability to change other users' roles.";
+      }
+      if (requestedRole === "MANAGER") {
+        return "Managers can approve employees, manage their own projects, and record payments.";
+      }
+      return "Employees can work on tasks assigned to them and see their own payments.";
+    }
+
+    if (action === "SUSPEND" || action === "REJECT") {
+      return "Existing work history is preserved. The user will not be able to sign in.";
+    }
+
+    if (action === "REACTIVATE") {
+      return "They will be able to sign in again with their existing role and work history.";
+    }
+
+    return "";
+  }
 
   return (
     <div className="space-y-5">
@@ -192,6 +270,30 @@ export function EmployeesList() {
         ))}
       </div>
 
+      {tab === "ACTIVE" && !loading && (
+        <div className="flex items-center justify-end gap-2">
+          <label htmlFor="role-filter" className="text-sm text-muted-foreground">
+            Role
+          </label>
+          <Select
+            value={roleFilter}
+            onValueChange={(v) => setRoleFilter(v as UserRole | "ALL")}
+          >
+            <SelectTrigger id="role-filter" size="sm" className="w-[180px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">All roles</SelectItem>
+              {ROLES.map((r) => (
+                <SelectItem key={r} value={r}>
+                  {roleLabel(r)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
       {tab === "PENDING" && !loading && (
         <div>
           <div className="mb-2 flex items-center justify-between gap-2">
@@ -214,7 +316,7 @@ export function EmployeesList() {
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{invitation.email}</p>
                     <p className="text-[11px] text-muted-foreground">
-                      {invitation.role === "SUPER_ADMIN" ? "Admin" : "Employee"} · sent {formatDate(invitation.created_at)} · expires {formatDate(invitation.expires_at)}
+                      {roleLabel(invitation.role)} · sent {formatDate(invitation.created_at)} · expires {formatDate(invitation.expires_at)}
                     </p>
                   </div>
                   <Button
@@ -287,8 +389,19 @@ export function EmployeesList() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">{member.full_name}</p>
                   <p className="truncate text-[13px] text-muted-foreground">{member.email}</p>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {member.role ?? "No role"} · Joined {formatDate(member.created_at)} · {member.projects_count} projects
+                  <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Badge
+                      variant="secondary"
+                      className={cn("h-4 px-1.5 text-[10px]", roleBadgeClass(member.role))}
+                    >
+                      {roleLabel(member.role)}
+                    </Badge>
+                    <span>
+                      Joined {formatDate(member.created_at)} · {member.projects_count} projects
+                    </span>
+                    {isSelf(member) ? (
+                      <span className="text-muted-foreground/70">(you)</span>
+                    ) : null}
                   </p>
                 </div>
               </div>
@@ -361,42 +474,72 @@ export function EmployeesList() {
                     * target or granting a privileged role.
                     *
                     * canManageProfile() with requestedRole is what hides
-                    * "Approve as admin" from a manager and blocks every
-                    * action on a privileged row. */}
+                    * "Approve as manager"/"Approve as super admin" from a
+                    * manager and blocks every action on a privileged row;
+                    * isSelf() removes self-suspend and self-role-change. */}
                 <div className="flex flex-wrap shrink-0 items-center gap-1">
                   <Link href={`/employees/${member.id}`}>
                     <Button type="button" variant="ghost" size="sm">View</Button>
                   </Link>
                   {canActOn(member.role, "APPROVE", "EMPLOYEE") && member.status === "PENDING" && (
                     <>
-                      <Button type="button" size="sm" onClick={() => setPendingAction({ member, action: "APPROVE", role: "EMPLOYEE" })}>
-                        <Check className="size-3.5" /> Approve
-                      </Button>
-                      {canActOn(member.role, "APPROVE", "SUPER_ADMIN") && (
-                        <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "APPROVE", role: "SUPER_ADMIN" })}>
-                          Approve as admin
-                        </Button>
+                      {/* One button per grantable role: APPROVE writes
+                        *both* status and role, so unlike ROLE_CHANGED it
+                        * must carry the role explicitly. canActOn() with
+                        * that role is what removes the options a manager
+                        * cannot grant. */}
+                      {(["EMPLOYEE", "MANAGER", "SUPER_ADMIN"] as const).map(
+                        (r) =>
+                          canActOn(member.role, "APPROVE", r) && (
+                            <Button
+                              key={r}
+                              type="button"
+                              variant={r === "EMPLOYEE" ? "default" : "outline"}
+                              size="sm"
+                              onClick={() => setPendingAction({ member, action: "APPROVE", role: r })}
+                            >
+                              {r === "EMPLOYEE" ? <Check className="size-3.5" /> : null}
+                              Approve as {roleLabel(r).toLowerCase()}
+                            </Button>
+                          )
                       )}
                       <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "REJECT" })}>
                         <X className="size-3.5" /> Reject
                       </Button>
                     </>
                   )}
-                  {canActOn(member.role, "SUSPEND") && member.status === "ACTIVE" && (
-                    <>
-                      <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "SUSPEND" })}>Suspend</Button>
-                      {/* Role changes are super-admin only. */}
-                      {canChangeRoles && (
-                        <Button type="button" variant="ghost" size="sm" onClick={() => setPendingAction({ member, action: "ROLE_CHANGED", role: member.role === "SUPER_ADMIN" ? "EMPLOYEE" : "SUPER_ADMIN" })}>
-                          Make {member.role === "SUPER_ADMIN" ? "employee" : "admin"}
-                        </Button>
-                      )}
-                    </>
+                  {!isSelf(member) && canActOn(member.role, "SUSPEND") && member.status === "ACTIVE" && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "SUSPEND" })}>Suspend</Button>
                   )}
-                  {canActOn(member.role, "REACTIVATE") && member.status === "SUSPENDED" && (
+                  {!isSelf(member) && canActOn(member.role, "REACTIVATE") && member.status === "SUSPENDED" && (
                     <Button type="button" variant="outline" size="sm" onClick={() => setPendingAction({ member, action: "REACTIVATE" })}>
                       Reactivate
                     </Button>
+                  )}
+                  {/* Role changes are super-admin only, and cover all
+                    three tiers — the old two-button toggle could not
+                    *reach MANAGER at all. */}
+                  {!isSelf(member) && canChangeRoles && assignableRoles(member).length > 0 && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        render={
+                          <Button type="button" variant="ghost" size="sm">
+                            Change role
+                            <ChevronDown className="size-3.5" />
+                          </Button>
+                        }
+                      />
+                      <DropdownMenuContent align="end">
+                        {assignableRoles(member).map((r) => (
+                          <DropdownMenuItem
+                            key={r}
+                            onClick={() => setPendingAction({ member, action: "ROLE_CHANGED", role: r })}
+                          >
+                            Make {roleLabel(r).toLowerCase()}
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                 </div>
             </div>
@@ -407,9 +550,23 @@ export function EmployeesList() {
       <Dialog open={!!pendingAction} onOpenChange={(open) => !open && setPendingAction(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Confirm {actionLabel}</DialogTitle>
-            <DialogDescription>
-              {pendingAction?.member.full_name} will be {actionLabel}d. Existing tasks, comments, payments, and activity remain attached.
+            <DialogTitle>
+              {pendingAction?.action === "ROLE_CHANGED" && pendingAction.role
+                ? `Make ${roleLabel(pendingAction.role).toLowerCase()}`
+                : `Confirm ${actionLabel}`}
+            </DialogTitle>
+            <DialogDescription render={<div className="space-y-2" />}>
+              <div className="space-y-2">
+                <p>
+                  {pendingAction?.action === "ROLE_CHANGED" && pendingAction.role
+                    ? `${pendingAction?.member.full_name} will become a ${roleLabel(pendingAction.role).toLowerCase()}.`
+                    : `${pendingAction?.member.full_name} will be ${actionLabel}d.`}{" "}
+                  Existing tasks, comments, payments, and activity remain attached.
+                </p>
+                {confirmationCopy() ? (
+                  <p className="font-medium text-foreground">{confirmationCopy()}</p>
+                ) : null}
+              </div>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -465,6 +622,12 @@ export function EmployeesList() {
               className="space-y-4"
               onSubmit={async (e) => {
                 e.preventDefault();
+                // Re-check at submit time, not just in the dropdown: the
+                // session role can change between render and click.
+                if (!inviteRoles.includes(inviteRole)) {
+                  toast.error("You are not allowed to invite that role");
+                  return;
+                }
                 setInviting(true);
                 const result = await inviteEmployeeAction({ email: inviteEmail, role: inviteRole });
                 setInviting(false);
@@ -497,7 +660,7 @@ export function EmployeesList() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {invitableRoles(role).map((r) => (
+                    {inviteRoles.map((r) => (
                       <SelectItem key={r} value={r}>
                         {ROLE_LABELS[r]}
                       </SelectItem>

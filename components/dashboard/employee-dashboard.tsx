@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { CalendarSetupBanner } from "@/components/calendar/calendar-setup-banner";
+import { useSession } from "@/components/providers/session-provider";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, CheckCircle2, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -21,6 +23,7 @@ interface EmployeeDashboardProps {
  */
 export function EmployeeDashboard({ firstName }: EmployeeDashboardProps) {
   const { data, isLoading } = useQuery(employeeDashboardOptions);
+  const { userId } = useSession();
 
   if (isLoading || !data) {
     return (
@@ -32,6 +35,11 @@ export function EmployeeDashboard({ firstName }: EmployeeDashboardProps) {
 
   return (
     <div className="space-y-8">
+      {/* §71 — discovery for calendar + push setup. Renders nothing once
+          either channel is enabled, so it costs an already-cached query
+          and nothing visible. */}
+      <CalendarSetupBanner userId={userId} />
+
       {/* Header (§10): what do I need to do? */}
       <div>
         <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">

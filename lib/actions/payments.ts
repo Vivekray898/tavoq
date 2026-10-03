@@ -2,8 +2,9 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { requireStaff, requireAuth } from "@/lib/auth";
-import { sendEventEmail } from "@/lib/notifications";
+import { createNotification, sendEventEmail } from "@/lib/notifications";
 import type { ActionResponse } from "@/types/database";
+import { formatCurrency } from "@/lib/utils";
 
 // ──────────────────────────────────────────────
 // Dedicated employee payout workspace.
@@ -15,25 +16,18 @@ import type { ActionResponse } from "@/types/database";
 // workflows never create or edit them.
 // ──────────────────────────────────────────────
 
-export type PaymentKind = "TASK" | "CUSTOM";
-
-/** Human-readable payment row — never exposes internal IDs. */
-export interface PaymentItem {
-  id: string;
-  kind: PaymentKind;
-  employee_id: string | null;
-  employee_name: string | null;
-  task_id: string | null;
-  label: string; // task title or custom description
-  project_name: string | null;
-  client_name: string | null;
-  amount: number;
-  status: "PENDING" | "PAID";
-  paid_at: string | null;
-  payment_note: string | null;
-  /** Present on workspace/history items; batch-returns may omit it. */
-  created_at?: string;
-}
+// Payment shapes and the adjustment fold live in a pure module so they
+// can be unit tested — this file is "use server", which the node test
+// runner cannot import, and Next requires every export of a "use server"
+// file to be an async function (so the values are re-exported from
+// lib/payments/adjustments rather than from here).
+import {
+  foldAdjustments,
+  one,
+  type PaymentItem,
+  type PaymentLedgerRow,
+  type PaymentKind,
+} from "@/lib/payments/adjustments";
 
 export interface EmployeeSummary {
   id: string;
@@ -74,17 +68,6 @@ function istWeekBounds(reference = new Date()): { start: Date; end: Date } {
   return { start, end };
 }
 
-/** Pull embedded relation rows whether Supabase returns array or object. */
-function one<T>(embedded: T[] | T | null | undefined): T | null {
-  if (!embedded) return null;
-  return Array.isArray(embedded) ? (embedded[0] ?? null) : embedded;
-}
-
-/**
- * Admin workspace: summary + per-employee rollup + unified history
- * (task-based + custom). Employees without any payment rows still
- * appear (from profiles) so the admin can start a payment for them.
- */
 export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorkspaceData>> {
   try {
     await requireStaff();
@@ -106,7 +89,9 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
         .from("payments")
         .select(
           `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+           kind, parent_payment_id,
            employee:profiles!payments_employee_id_fkey(full_name),
+           paid_by_profile:profiles!payments_paid_by_fkey(full_name),
            task:tasks(id, title, project:projects(name, client:clients(name)))`
         )
         .order("created_at", { ascending: false })
@@ -122,55 +107,12 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
       return { success: false, error: "Failed to load payments" };
     }
 
-    type PaymentRow = {
-      id: string;
-      task_id: string | null;
-      employee_id: string | null;
-      description: string | null;
-      amount: number | string;
-      paid_at: string | null;
-      payment_note: string | null;
-      created_at: string;
-      employee: { full_name: string }[] | { full_name: string } | null;
-      task: {
-        id: string;
-        title: string;
-        project:
-          | { name: string; client: { name: string }[] | { name: string } | null }[]
-          | { name: string; client: { name: string }[] | { name: string } | null }
-          | null;
-      } | null;
-    };
-
     // §6 — created date is shown on every payment detail.
-
-    const items: PaymentItem[] = (paymentsRes.data ?? []).map((raw: unknown) => {
-      const row = raw as PaymentRow;
-      const task = row.task;
-      const project = task ? one(task.project) : null;
-      const client = project
-        ? one(
-            (project as { client?: { name: string }[] | { name: string } | null }).client ??
-              null
-          )
-        : null;
-      const employee = one(row.employee);
-      return {
-        id: row.id,
-        kind: row.task_id ? "TASK" : "CUSTOM",
-        employee_id: row.employee_id,
-        employee_name: employee?.full_name ?? null,
-        task_id: row.task_id,
-        label: row.task_id ? (task?.title ?? "Task") : (row.description ?? "Custom payment"),
-        project_name: project?.name ?? null,
-        client_name: client?.name ?? null,
-        amount: Number(row.amount),
-        status: row.paid_at ? "PAID" : "PENDING",
-        paid_at: row.paid_at,
-        payment_note: row.payment_note,
-        created_at: row.created_at,
-      };
-    });
+    // Adjustments are folded into their parent here, so every rollup
+    // below sums NET amounts without knowing adjustments exist.
+    const items: PaymentItem[] = foldAdjustments(
+      (paymentsRes.data ?? []) as unknown as PaymentLedgerRow[]
+    );
 
     let pendingTotal = 0;
     let pendingCount = 0;
@@ -448,6 +390,19 @@ export async function createPaymentFromTasks(
       paymentNote,
     });
 
+    // §71 — phone ping. createPaymentFromTasks always marks the payment
+    // paid (paidAt is set unconditionally), so there is always money to
+    // announce here.
+    void notifyPaymentPaid(
+      employeeId,
+      createdTaskIds.length === 1
+        ? (rows.find((t: { id: string }) => t.id === createdTaskIds[0])?.title ?? "Task")
+        : `${createdTaskIds.length} tasks`,
+      totalAmount,
+      createdTaskIds.length === 1 ? createdTaskIds[0] : null,
+      employee.full_name
+    );
+
     return {
       success: true,
       data: { created, totalAmount, employee_name: employee.full_name },
@@ -513,6 +468,17 @@ export async function createCustomPayment(
         amount,
         paymentNote,
       });
+
+      // §71 — same gate as the email: only when money actually moved.
+      // A payment created as PENDING is announced when it is later
+      // marked paid, not here.
+      void notifyPaymentPaid(
+        employeeId,
+        description.trim(),
+        amount,
+        null,
+        employee.full_name
+      );
     }
 
     return {
@@ -527,6 +493,9 @@ export async function createCustomPayment(
         project_name: null,
         client_name: null,
         amount,
+        base_amount: amount,
+        adjustment_total: 0,
+        adjustments: [],
         status: markPaidNow ? "PAID" : "PENDING",
         paid_at: markPaidNow ? new Date().toISOString() : null,
         payment_note: paymentNote || null,
@@ -597,6 +566,19 @@ export async function markPaymentPaid(
       });
     }
 
+    // §71 — "you were paid" is the notification people actually want on
+    // their phone, so it goes out over push as well as email. Keyed on
+    // employee_id (not email) because push subscriptions belong to a
+    // user id.
+    if (paidRow.employee_id) {
+      void notifyPaymentPaid(
+        paidRow.employee_id,
+        paidRow.task?.title ?? paidRow.description ?? "Payment",
+        Number(paidRow.amount),
+        paidRow.task_id
+      );
+    }
+
     return {
       success: true,
       data: {
@@ -609,6 +591,9 @@ export async function markPaymentPaid(
         project_name: null,
         client_name: null,
         amount: Number(paidRow.amount),
+        base_amount: Number(paidRow.amount),
+        adjustment_total: 0,
+        adjustments: [],
         status: "PAID",
         paid_at: paidAt,
         payment_note: paymentNote || paidRow.payment_note,
@@ -642,7 +627,10 @@ export interface EarningsData {
       label: string;
       kind: PaymentKind;
       project_name: string | null;
+      /** NET amount, including any bonus or deduction applied. */
       amount: number;
+      /** Net of adjustments; 0 when none. Drives the hint under the row. */
+      adjustment_total: number;
       status: "PENDING" | "PAID";
       paid_at: string | null;
       payment_note: string | null;
@@ -665,6 +653,7 @@ export async function getMyEarnings(
       .from("payments")
       .select(
         `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+         kind, parent_payment_id,
          task:tasks(id, title, project:projects(name))`
       )
       .order("created_at", { ascending: false })
@@ -675,21 +664,24 @@ export async function getMyEarnings(
       return { success: false, error: "Failed to load your payments" };
     }
 
-    type Row = {
-      id: string;
-      task_id: string | null;
-      employee_id: string | null;
-      description: string | null;
-      amount: number | string;
-      paid_at: string | null;
-      payment_note: string | null;
-      created_at: string;
-      task: {
-        id: string;
-        title: string;
-        project: { name: string }[] | { name: string } | null;
-      } | null;
-    };
+    type Row = PaymentLedgerRow;
+
+    // Fold adjustments the same way the workspace does, so the employee
+    // sees the NET they actually received. Unlike the workspace, an
+    // adjustment whose parent is missing here is a real inconsistency
+    // (RLS guarantees an employee can only ever read their own rows),
+    // so it is kept as its own entry rather than silently discarded.
+    const adjustmentsByParent = new Map<string, number>();
+    for (const raw of data ?? []) {
+      const row = raw as unknown as Row;
+      if ((row.kind ?? "PAYMENT") !== "ADJUSTMENT") continue;
+      const parentId = row.parent_payment_id;
+      if (!parentId) continue;
+      adjustmentsByParent.set(
+        parentId,
+        (adjustmentsByParent.get(parentId) ?? 0) + Number(row.amount)
+      );
+    }
 
     let totalPaid = 0;
     let thisWeek = 0;
@@ -702,11 +694,21 @@ export async function getMyEarnings(
 
     for (const raw of data ?? []) {
       const row = raw as unknown as Row;
+      // An adjustment is never its own line here; it is folded into its
+      // parent below. An adjustment with no readable parent is kept as a
+      // standalone entry so the employee still sees the money.
+      const isAdjustment = (row.kind ?? "PAYMENT") === "ADJUSTMENT";
+      const isOrphanAdjustment = isAdjustment && row.parent_payment_id
+        ? !data?.some((p) => (p as unknown as Row).id === row.parent_payment_id)
+        : isAdjustment;
+      if (isAdjustment && !isOrphanAdjustment) continue;
+
       const task = row.task;
       const project = task ? one(task.project) : null;
       const kind: PaymentKind = row.task_id ? "TASK" : "CUSTOM";
       const label = row.task_id ? (task?.title ?? "Task") : (row.description ?? "Custom payment");
-      const amount = Number(row.amount);
+      const adjustment_total = isAdjustment ? 0 : (adjustmentsByParent.get(row.id) ?? 0);
+      const amount = Number(row.amount) + adjustment_total;
       const status: "PENDING" | "PAID" = row.paid_at ? "PAID" : "PENDING";
 
       if (status === "PAID") {
@@ -733,6 +735,7 @@ export async function getMyEarnings(
           kind,
           project_name: project?.name ?? null,
           amount,
+          adjustment_total,
           status,
           paid_at: row.paid_at,
           payment_note: row.payment_note,
@@ -819,6 +822,9 @@ export async function markPaymentsPaidBatch(
     type BatchRow = {
       id: string;
       task_id: string | null;
+      // Selected by the query above and needed to key the per-employee
+      // push, which is addressed by user id rather than email.
+      employee_id: string | null;
       description: string | null;
       amount: number | string;
       payment_note: string | null;
@@ -887,6 +893,33 @@ export async function markPaymentsPaidBatch(
       });
     }
 
+    // §71 — one push per employee for the whole batch, matching the
+    // email: a phone buzzing 30 times for one bulk action is worse than
+    // useless.
+    const pushedIds = new Set<string>();
+    for (const raw of payable) {
+      const employeeId = raw.employee_id;
+      if (!employeeId || pushedIds.has(employeeId)) continue;
+      pushedIds.add(employeeId);
+      const employee = one(raw.employee);
+      const own = payable.filter(
+        (p: { employee_id: string | null }) => p.employee_id === employeeId
+      );
+      const total = own.reduce(
+        (sum: number, p: { amount: number | string }) => sum + Number(p.amount),
+        0
+      );
+      void notifyPaymentPaid(
+        employeeId,
+        own.length === 1
+          ? (own[0].task_id ? (one(own[0].task)?.title ?? "Task") : (own[0].description ?? "Payment"))
+          : `${own.length} payments`,
+        total,
+        null,
+        employee?.full_name ?? null
+      );
+    }
+
     return {
       success: true,
       data: {
@@ -926,5 +959,233 @@ export async function updatePaymentNote(
     return { success: true, data: { payment_note: (data as { payment_note: string | null }).payment_note } };
   } catch {
     return { success: false, error: "Unauthorized" };
+  }
+}
+
+// ──────────────────────────────────────────────
+// §71 — Payment adjustments.
+//
+// A bonus or a deduction recorded against a payment that has already
+// been paid. The ledger stays append-only: an adjustment is a NEW
+// payments row pointing at its parent, never a mutation of the
+// original, and reversing one means recording the opposite amount.
+// That is what makes the history auditable — there is always a full
+// trail of what was paid and every correction applied to it.
+// ──────────────────────────────────────────────
+
+export interface CreateAdjustmentInput {
+  parent_payment_id: string;
+  /** Signed: positive is a bonus, negative is a deduction. */
+  amount: number;
+  /** Required — this is what the employee sees and what makes the row auditable. */
+  reason: string;
+}
+
+export async function createPaymentAdjustment(
+  input: CreateAdjustmentInput
+): Promise<ActionResponse<PaymentItem>> {
+  try {
+    const profile = await requireStaff();
+    const supabase = await createClient();
+
+    const reason = input.reason.trim();
+    if (!reason) {
+      return { success: false, error: "A reason is required for an adjustment" };
+    }
+
+    const amount = Number(input.amount);
+    if (!Number.isFinite(amount) || amount === 0) {
+      return { success: false, error: "The adjustment amount must not be zero" };
+    }
+
+    // The parent must be a real, already-paid payment. Re-reading it
+    // rather than trusting the client is what stops an adjustment being
+    // attached to an unpaid row (where the admin can still edit the
+    // amount before paying) or to something outside this workspace.
+    const { data: parent, error: parentError } = await supabase
+      .from("payments")
+      .select(
+        `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+         kind, parent_payment_id,
+         employee:profiles!payments_employee_id_fkey(full_name, email),
+         task:tasks(id, title)`
+      )
+      .eq("id", input.parent_payment_id)
+      .maybeSingle();
+
+    if (parentError) {
+      console.error("[createPaymentAdjustment] parent", parentError);
+      return { success: false, error: "Failed to load that payment" };
+    }
+    if (!parent) {
+      return { success: false, error: "Payment not found" };
+    }
+    if (!parent.paid_at) {
+      return {
+        success: false,
+        error: "Only a paid payment can be adjusted — edit the amount before marking it paid",
+      };
+    }
+    // No daisy chains: an adjustment always points at the original
+    // payment. Applying a second correction means targeting the same
+    // parent, which is what the UI does.
+    if ((parent.kind ?? "PAYMENT") !== "PAYMENT") {
+      return {
+        success: false,
+        error: "Adjustments attach to the original payment, not to another adjustment",
+      };
+    }
+    if (!parent.employee_id) {
+      return {
+        success: false,
+        error: "This payment has no employee, so it can't be adjusted",
+      };
+    }
+
+    const parentRow = parent as unknown as PaymentLedgerRow;
+    const employee = one(
+      (parent as unknown as { employee: { full_name: string; email: string }[] | { full_name: string; email: string } | null }).employee
+    );
+
+    const { data: created, error: insertError } = await supabase
+      .from("payments")
+      .insert({
+        task_id: parent.task_id,
+        employee_id: parent.employee_id,
+        amount,
+        paid_at: new Date().toISOString(),
+        paid_by: profile.id,
+        payment_note: reason,
+        description: reason,
+        kind: "ADJUSTMENT",
+        parent_payment_id: parent.id,
+      })
+      .select("id, created_at")
+      .single();
+
+    if (insertError || !created) {
+      console.error("[createPaymentAdjustment] insert", insertError);
+      return { success: false, error: "Couldn't record the adjustment" };
+    }
+
+    if (employee?.email) {
+      const bonus = amount > 0;
+      void sendEventEmail("PAYMENT_PAID", {
+        to: employee.email,
+        employeeName: employee.full_name,
+        taskTitle: parentRow.task?.title ?? parentRow.description ?? "Payment",
+        amount,
+        paymentNote: `${bonus ? "Bonus" : "Deduction"}: ${reason}`,
+      });
+    }
+
+    // §71 — an adjustment is the one payment event the employee has no
+    // other way to hear about: the original payment was already paid and
+    // emailed days earlier, so without this the bonus lands silently.
+    // (The early guard above already rejected a null employee_id, but
+    // the row type stays nullable, so narrow it here.)
+    if (parentRow.employee_id) {
+      void notifyAdjustmentRecorded(
+        parentRow.employee_id,
+        amount,
+        reason,
+        employee?.full_name ?? null
+      );
+    }
+
+    // Return the adjustment as a PaymentItem so the client can patch the
+    // parent row without a refetch. The parent is untouched — only this
+    // new row exists, so its own base/net are the adjustment itself.
+    return {
+      success: true,
+      data: {
+        id: (created as { id: string }).id,
+        kind: parentRow.task_id ? "TASK" : "CUSTOM",
+        employee_id: parentRow.employee_id,
+        employee_name: employee?.full_name ?? null,
+        task_id: parentRow.task_id,
+        label: parentRow.task_id
+          ? (parentRow.task?.title ?? "Task")
+          : (parentRow.description ?? "Custom payment"),
+        project_name: null,
+        client_name: null,
+        amount,
+        base_amount: amount,
+        adjustment_total: 0,
+        adjustments: [],
+        status: "PAID",
+        paid_at: new Date().toISOString(),
+        payment_note: reason,
+        created_at: (created as { created_at: string }).created_at,
+      },
+    };
+  } catch {
+    return { success: false, error: "Unauthorized" };
+  }
+}
+
+
+// ──────────────────────────────────────────────
+// §71 — "you were paid" delivery.
+//
+// Every payment path already emailed. This adds the phone ping, and it
+// goes through createNotification rather than sendPushToUser directly so
+// the payment also lands in the in-app notification centre — one code
+// path, two channels, and the employee sees it whether or not push is
+// configured.
+//
+// Fire-and-forget throughout: a push failure must never turn a completed
+// payment into an error the admin has to reason about.
+// ──────────────────────────────────────────────
+
+async function notifyPaymentPaid(
+  employeeId: string,
+  label: string,
+  amount: number,
+  taskId: string | null,
+  employeeName?: string | null
+): Promise<void> {
+  try {
+    await createNotification({
+      userId: employeeId,
+      type: "PAYMENT_PAID",
+      title: "Payment received",
+      message: `${employeeName ? `${employeeName}, ` : ""}you were paid ${formatCurrency(amount)} for ${label}`,
+      // A task-linked payment deep-links to the task; a custom payment
+      // has nowhere better to go than the payments workspace.
+      referenceType: taskId ? "task" : "payment",
+      referenceId: taskId,
+    });
+  } catch (err) {
+    console.error("[notifyPaymentPaid]", err);
+  }
+}
+
+
+/**
+ * §71 — announce a bonus or deduction.
+ *
+ * Routed through createNotification so the adjustment also appears in the
+ * in-app notification centre, and tagged distinctly from an ordinary
+ * payment so the wording is honest ("bonus", not "payment received").
+ */
+async function notifyAdjustmentRecorded(
+  employeeId: string,
+  amount: number,
+  reason: string,
+  employeeName: string | null
+): Promise<void> {
+  try {
+    const bonus = amount > 0;
+    await createNotification({
+      userId: employeeId,
+      type: "PAYMENT_PAID",
+      title: bonus ? "Bonus added" : "Deduction applied",
+      message: `${employeeName ? `${employeeName}, ` : ""}${bonus ? "+" : "\u2212"}${formatCurrency(Math.abs(amount))} \u2014 ${reason}`,
+      referenceType: "payment",
+      referenceId: null,
+    });
+  } catch (err) {
+    console.error("[notifyAdjustmentRecorded]", err);
   }
 }

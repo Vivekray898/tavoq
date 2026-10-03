@@ -6,6 +6,7 @@ import {
   Users,
   IndianRupee,
   Bell,
+  CalendarDays,
   Settings,
   User,
   MoreHorizontal,
@@ -41,6 +42,7 @@ export const ADMIN_NAV: NavSection[] = [
     title: "Work",
     items: [
       { label: "Tasks", href: "/tasks", icon: CheckSquare },
+      { label: "Calendar", href: "/calendar", icon: CalendarDays },
       { label: "Projects", href: "/projects", icon: FolderKanban },
       { label: "Clients", href: "/clients", icon: Building2 },
     ],
@@ -68,6 +70,7 @@ export const EMPLOYEE_NAV: NavSection[] = [
   {
     items: [
       { label: "My Tasks", href: "/tasks", icon: CheckSquare },
+      { label: "Calendar", href: "/calendar", icon: CalendarDays },
       { label: "Payments", href: "/payments", icon: IndianRupee },
     ],
   },

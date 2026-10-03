@@ -851,3 +851,223 @@ export async function setupWatchChannel(): Promise<
     };
   }
 }
+
+// ──────────────────────────────────────────────
+// §71 — Automatic sync on task mutation.
+//
+// A task's Google Calendar event used to change only when the assignee
+// pressed "Sync now", so their phone stayed a day behind. This is the
+// push side: every task write fires an inline, fire-and-forget sync
+// for whoever the task belongs to.
+//
+// WHY INLINE, NOT A QUEUE
+// Volume is low (task writes are human-paced), a failed sync is not
+// fatal, and the daily cron already reconciles anything that drifts —
+// including every sync that fails here because a token was briefly
+// invalid. A queue would add moving parts to buy latency we do not
+// need. The trade-off is explicit: a sync started by `void` may not
+// finish if the serverless invocation is frozen right after the
+// response is sent. That is precisely the case the cron covers, so
+// nothing is permanently lost — it is just repaired on the next run.
+//
+// NEVER THROWS. Every caller is a task mutation whose real work has
+// already been committed to the database; a calendar failure must
+// never turn a successful save into an error, or make the client
+// retry a write that already happened.
+// ──────────────────────────────────────────────
+
+/**
+ * Sync one assignee's Google Calendar after a task changed.
+ *
+ * @param assigneeId the task's current assignee, or null/undefined when
+ *   the task has no assignee (nothing to sync).
+ * @param taskId when given, only that task is synced; otherwise the
+ *   assignee's whole calendar is reconciled.
+ *
+ * A 404/410 from Google means the event or the token is gone; both are
+ * expected in normal operation (the user deleted the event, or revoked
+ * the connection) and are swallowed like any other failure.
+ */
+export async function syncAssigneeCalendar(
+  assigneeId: string | null | undefined,
+  taskId?: string
+): Promise<void> {
+  if (!assigneeId) return;
+  try {
+    // No token row means the user never connected — the common case, so
+    // check it before touching the network.
+    const row = await loadTokenRow(assigneeId);
+    if (!row) return;
+
+    if (taskId) {
+      await syncSingleTaskForUser(assigneeId, row, taskId);
+      return;
+    }
+    await fullSyncForUser(assigneeId);
+  } catch (err) {
+    console.error(
+      "[google] syncAssigneeCalendar failed",
+      assigneeId,
+      taskId ?? "(all)",
+      err instanceof Error ? err.message : err
+    );
+  }
+}
+
+/**
+ * Create, update, or remove ONE task's event for ONE user.
+ *
+ * The three outcomes, all keyed off task status and google_event_id:
+ *   COMPLETED + has event  → delete the event (keep the calendar clean)
+ *   COMPLETED + no event   → nothing to do
+ *   open + has event       → update in place
+ *   open + no event        → insert
+ */
+async function syncSingleTaskForUser(
+  userId: string,
+  row: GoogleTokenRow,
+  taskId: string
+): Promise<void> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("tasks")
+    .select(TASK_SELECT)
+    .eq("id", taskId)
+    .eq("assigned_to", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[google] sync single task read", error);
+    return;
+  }
+
+  const task = data as unknown as SyncableTask | null;
+
+  // No row: either the task was deleted, or it is no longer assigned to
+  // this user (reassigned away). Both are handled by the caller's
+  // separate full-sync for the previous assignee.
+  if (!task) return;
+
+  const { accessToken } = await getAccessToken(row);
+  const base = `${CALENDAR_API}/calendars/${encodeURIComponent(row.calendar_id)}/events`;
+
+  // Completed work leaves the calendar.
+  if (task.status === "COMPLETED") {
+    if (!task.google_event_id) return;
+    await deleteEvent(row, task.google_event_id, accessToken);
+    await admin.from("tasks").update({ google_event_id: null }).eq("id", task.id);
+    return;
+  }
+
+  const event = buildEventBody(task);
+
+  if (task.google_event_id) {
+    try {
+      await googleFetch(
+        `${base}/${encodeURIComponent(task.google_event_id)}?sendUpdates=none`,
+        accessToken,
+        { method: "PUT", body: JSON.stringify(event) }
+      );
+    } catch (err) {
+      // A stale id (event deleted in Google) leaves us unable to update.
+      // Fall back to an insert so the event is not simply lost.
+      if (isGoogleGone(err)) {
+        await admin.from("tasks").update({ google_event_id: null }).eq("id", task.id);
+        await insertEvent(row, task.id, event, accessToken, base, admin);
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+
+  await insertEvent(row, task.id, event, accessToken, base, admin);
+}
+
+/** Insert a new event and record its id on the task. */
+async function insertEvent(
+  row: GoogleTokenRow,
+  taskId: string,
+  event: Record<string, unknown>,
+  accessToken: string,
+  base: string,
+  admin: ReturnType<typeof createAdminClient>
+): Promise<void> {
+  try {
+    const created = await googleFetch<{ id?: string }>(
+      base,
+      accessToken,
+      { method: "POST", body: JSON.stringify(event) }
+    );
+    if (created.id) {
+      await admin.from("tasks").update({ google_event_id: created.id }).eq("id", taskId);
+    }
+  } catch (err) {
+    console.error("[google] insert event", err);
+  }
+}
+
+/**
+ * Delete one event, tolerating it already being gone.
+ *
+ * The reassignment trigger (migration 016) clears google_event_id when a
+ * task changes hands, so this is also the path that removes an event
+ * from the PREVIOUS assignee's calendar. Google answers 404/410 for an
+ * event that no longer exists; that is success from our point of view,
+ * not an error worth logging loudly.
+ */
+async function deleteEvent(
+  row: GoogleTokenRow,
+  googleEventId: string,
+  accessToken: string
+): Promise<void> {
+  const base = `${CALENDAR_API}/calendars/${encodeURIComponent(row.calendar_id)}/events`;
+  try {
+    await googleFetch(
+      `${base}/${encodeURIComponent(googleEventId)}`,
+      accessToken,
+      { method: "DELETE" }
+    );
+  } catch (err) {
+    if (isGoogleGone(err)) return; // already deleted — the desired state
+    console.error("[google] delete event", err);
+  }
+}
+
+/**
+ * Remove one known event from one user's calendar.
+ *
+ * Exported for the task-delete path, which reads google_event_id while
+ * the row still exists and must delete the event before the row goes —
+ * after that the id can no longer be found.
+ *
+ * Never throws: the task is already deleted (or about to be), and a
+ * leftover event is a cosmetic problem the cron can reconcile, whereas a
+ * thrown error here would make a successful delete look like a failure.
+ */
+export async function removeCalendarEvent(
+  userId: string | null | undefined,
+  googleEventId: string
+): Promise<void> {
+  if (!userId) return;
+  try {
+    const row = await loadTokenRow(userId);
+    // Never connected: there is no calendar to remove anything from.
+    if (!row) return;
+    const { accessToken } = await getAccessToken(row);
+    await deleteEvent(row, googleEventId, accessToken);
+  } catch (err) {
+    console.error(
+      "[google] removeCalendarEvent failed",
+      userId,
+      err instanceof Error ? err.message : err
+    );
+  }
+}
+
+/** True for the "this resource no longer exists" family of Google errors. */
+function isGoogleGone(err: unknown): boolean {
+  const status = (err as { status?: number; statusCode?: number })?.status ??
+    (err as { statusCode?: number })?.statusCode;
+  return status === 404 || status === 410;
+}

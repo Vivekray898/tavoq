@@ -158,9 +158,16 @@ describe("the OAuth callback and /login share one routing table", () => {
   test("callback only ever targets /login on a genuine OAuth failure", () => {
     // /login is correct for "exchange failed" and for "no code". It must
     // not be reachable from the success branch.
-    const successAt = callback.indexOf("getAccountDestination(");
+    //
+    // Anchor on `destinationFor(` — the success path's routing helper —
+    // rather than on `getAccountDestination(`, which now lives inside
+    // that helper at the bottom of the file. Either every /login sits
+    // after the first success-path route, or an authenticated user can
+    // reach it.
+    const successAt = callback.indexOf("destinationFor(");
+    assert.ok(successAt > -1, "callback must route the success path");
     const loginUses = [...callback.matchAll(/\/login/g)].map((m) => m.index ?? -1);
-    assert.ok(successAt > -1);
+    assert.ok(loginUses.length > 0);
     for (const at of loginUses) {
       assert.ok(
         at > successAt,

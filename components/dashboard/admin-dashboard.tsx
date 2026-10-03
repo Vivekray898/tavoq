@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { CalendarSetupBanner } from "@/components/calendar/calendar-setup-banner";
+import { useSession } from "@/components/providers/session-provider";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
@@ -36,6 +38,7 @@ interface AdminDashboardProps {
  */
 export function AdminDashboard({ firstName: _firstName }: AdminDashboardProps) {
   const { data, isLoading } = useQuery(adminDashboardOptions);
+  const { userId } = useSession();
   const activityQuery = useQuery({
     queryKey: ["activity", "recent", 8] as const,
     queryFn: async () => {
@@ -68,6 +71,10 @@ export function AdminDashboard({ firstName: _firstName }: AdminDashboardProps) {
 
   return (
     <div className="space-y-8">
+      {/* §71 — same setup banner as the employee dashboard: an admin's
+          own deadlines sync the same way anyone else's do. */}
+      <CalendarSetupBanner userId={userId} />
+
       {/* Header + quick actions (§63) */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>

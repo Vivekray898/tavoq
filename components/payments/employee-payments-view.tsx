@@ -14,7 +14,7 @@ import {
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { myEarningsOptions } from "@/lib/queries/options";
 import { formatCurrency, cn } from "@/lib/utils";
-import type { PaymentItem } from "@/lib/actions/payments";
+import type { PaymentItem } from "@/lib/payments/adjustments";
 
 /**
  * §12 — employee earnings, mobile-first. Shows BOTH payment kinds
@@ -159,6 +159,12 @@ export function EmployeePaymentsView() {
                         label: item.label,
                         project_name: item.project_name,
                         amount: item.amount,
+                        // The employee has no list of individual adjustments
+                        // to show — only the net and whether any applied — so
+                        // the detail sheet reads the hint off the total.
+                        base_amount: item.amount - item.adjustment_total,
+                        adjustment_total: item.adjustment_total,
+                        adjustments: [],
                         status: item.status,
                         paid_at: item.paid_at,
                         payment_note: item.payment_note,
@@ -183,6 +189,20 @@ export function EmployeePaymentsView() {
                       <p className="text-sm font-semibold tabular-nums">
                         {formatCurrency(item.amount)}
                       </p>
+                      {item.adjustment_total !== 0 ? (
+                        <p
+                          className={cn(
+                            "text-[11px] font-medium tabular-nums",
+                            item.adjustment_total > 0
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : "text-destructive"
+                          )}
+                        >
+                          {item.adjustment_total > 0 ? "+" : "−"}
+                          {formatCurrency(Math.abs(item.adjustment_total))}{" "}
+                          {item.adjustment_total > 0 ? "bonus" : "deduction"}
+                        </p>
+                      ) : null}
                       <p
                         className={cn(
                           "text-[11px] font-medium",

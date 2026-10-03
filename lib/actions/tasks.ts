@@ -9,6 +9,10 @@ import {
   requireSuperAdmin,
 } from "@/lib/auth";
 import { canManageProject as canManageProjectRule } from "@/lib/permissions";
+import {
+  removeCalendarEvent,
+  syncAssigneeCalendar,
+} from "@/lib/actions/google-calendar";
 import { taskSchema, type TaskInput } from "@/validators/schemas";
 import {
   createNotification,
@@ -474,6 +478,11 @@ export async function createTaskAction(
       }
     }
 
+    // §71 — put it on the assignee's calendar now, not next time they
+    // press "Sync now". Fire-and-forget: the task is already saved, and
+    // a calendar failure must not turn a successful create into an error.
+    void syncAssigneeCalendar(task.assigned_to, task.id);
+
     return { success: true, data: task };
   } catch (err) {
     console.error("[createTaskAction] unexpected", err);
@@ -582,7 +591,9 @@ export async function updateTaskAction(
     const task = data as Task;
 
     // Notify reassignment (only when the assignee actually changed)
-    if (task.assigned_to && before && before.assigned_to !== task.assigned_to) {
+    const reassigned =
+      !!task.assigned_to && !!before && before.assigned_to !== task.assigned_to;
+    if (reassigned && task.assigned_to) {
       await createNotification({
         userId: task.assigned_to,
         type: "TASK_ASSIGNED",
@@ -592,6 +603,19 @@ export async function updateTaskAction(
         referenceId: task.id,
       });
     }
+
+    // §71 — calendar follows the task.
+    //
+    // On a reassignment BOTH calendars need attention: the new assignee
+    // gets the event created, and the previous assignee needs theirs
+    // removed. Migration 016's trigger already cleared google_event_id
+    // at the database, so the previous assignee's copy is found by
+    // reconciling their whole calendar rather than by event id — which
+    // is why that side gets no taskId.
+    if (reassigned && before && before.assigned_to && before.assigned_to !== task.assigned_to) {
+      void syncAssigneeCalendar(before.assigned_to);
+    }
+    void syncAssigneeCalendar(task.assigned_to, task.id);
 
     return { success: true, data: task };
   } catch (err) {
@@ -611,7 +635,7 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
       await Promise.all([
         supabase
           .from("tasks")
-          .select("id, title, project_id")
+          .select("id, title, project_id, assigned_to, google_event_id")
           .eq("id", id)
           .single(),
         supabase.from("payments").select("id").eq("task_id", id).maybeSingle(),
@@ -635,6 +659,14 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
         console.error("[deleteTaskAction] storage", storageError);
         return { success: false, error: "Failed to remove task attachments" };
       }
+    }
+
+    // §71 — remove the calendar event while google_event_id is still
+    // readable. After the delete the row is gone, so the id can no
+    // longer be found and the event would be orphaned in Google until
+    // the assignee manually deleted it.
+    if (task.google_event_id) {
+      await removeCalendarEvent(task.assigned_to, task.google_event_id);
     }
 
     const { error } = await supabase.from("tasks").delete().eq("id", id);
@@ -830,6 +862,19 @@ export async function updateTaskStatus(
           revisionComment: comment,
         });
       }
+    }
+
+    // §71 — the calendar only changes when work completes or reopens:
+    // COMPLETED removes the event, leaving COMPLETED re-adds it. Every
+    // other transition (TODO -> IN_PROGRESS, SUBMITTED, REVISION_*)
+    // leaves an unfinished task on the calendar exactly as it was, so
+    // syncing then would be a pointless API round trip.
+    const previousStatus = currentTask.status;
+    if (
+      task.assigned_to &&
+      (status === "COMPLETED" || previousStatus === "COMPLETED")
+    ) {
+      void syncAssigneeCalendar(task.assigned_to, taskId);
     }
 
     return { success: true, data: task };
@@ -1147,6 +1192,32 @@ export async function bulkUpdateTasks(
           referenceType: "task",
           referenceId: newlyAssigned[0].id,
         });
+      }
+    }
+
+    // §71 — one sync per affected assignee, not per task. A bulk status
+    // change touching 40 tasks across 3 people is 3 syncs, not 40.
+    if (data && data.length > 0) {
+      const { data: synced } = await supabase
+        .from("tasks")
+        .select("id, assigned_to")
+        .in(
+          "id",
+          data.map((r: { id: string }) => r.id)
+        );
+
+      const assignees = new Set<string>();
+      for (const row of (synced ?? []) as unknown as Array<{
+        id: string;
+        assigned_to: string | null;
+      }>) {
+        if (row.assigned_to) assignees.add(row.assigned_to);
+      }
+      for (const assigneeId of assignees) {
+        // No taskId: fullSync reconciles everything that assignee owns,
+        // which is cheaper than one call per id and also repairs events
+        // the bulk update orphaned.
+        void syncAssigneeCalendar(assigneeId);
       }
     }
 

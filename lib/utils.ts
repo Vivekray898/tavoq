@@ -2,6 +2,38 @@
 export { cn } from "cn";
 
 import { CURRENCY_SYMBOL } from "./constants.ts";
+import type { UserRole } from "../types/database.ts";
+
+/**
+ * Human-readable name for a role.
+ *
+ * A null role is not a fourth role — it is a signup that nobody has
+ * approved yet, so it reads as "Pending approval" rather than blank or
+ * "No role".
+ *
+ * Takes `UserRole | null | undefined` on purpose: profiles rows can
+ * arrive from JSON payloads typed loosely elsewhere in the app, and a
+ * helper that only accepted UserRole would need a cast at every call
+ * site. An unknown string falls through to "Employee", which is the
+ * least-privileged reading — never a silent grant of higher access.
+ */
+export function roleLabel(role: UserRole | null | undefined): string {
+  if (!role) return "Pending approval";
+  if (role === "SUPER_ADMIN") return "Super admin";
+  if (role === "MANAGER") return "Manager";
+  return "Employee";
+}
+
+/**
+ * Tailwind classes for a role badge, so the three tiers read apart at a
+ * glance rather than relying on text alone.
+ */
+export function roleBadgeClass(role: UserRole | null | undefined): string {
+  if (!role) return "bg-amber-500/10 text-amber-700 dark:text-amber-400";
+  if (role === "SUPER_ADMIN") return "bg-violet-500/10 text-violet-700 dark:text-violet-400";
+  if (role === "MANAGER") return "bg-blue-500/10 text-blue-700 dark:text-blue-400";
+  return "bg-muted text-muted-foreground";
+}
 
 /**
  * Format a number as currency (INR).
