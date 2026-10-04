@@ -173,19 +173,57 @@ Automated: `tests/payments-ui.test.ts` (40 tests).
 - [ ] The grey line under a title starts with "Task" or "Custom"
 - [ ] It reads identically on desktop and mobile
 
-## 3. Remaining Phase 4 steps
+## 3. Phase 4C — mark-paid dialog, bulk actions, Zod
+
+Automated: `tests/payment-schemas.test.ts` (26 tests).
+
+### 3.1 Mark-paid dialog
+
+- [ ] Method selector offers UPI / Bank transfer / Cash / Other
+- [ ] Paid-on date defaults to blank (meaning today) and cannot be future
+- [ ] Reference / UTR is optional and saved to the payment
+- [ ] The dialog shows the batch TOTAL and, for multi-employee batches,
+      a per-employee subtotal with counts
+- [ ] Per-employee subtotal uses the same labels as the table
+
+### 3.2 Paid rows are complete
+
+- [ ] A marked-paid row has status, paid_at, paid_by AND payment_method
+- [ ] The chosen method shows on the row's method badge
+- [ ] The chosen reference is visible in the detail sheet
+- [ ] A chosen paid-on date lands on THAT calendar day in the ledger
+      (not the previous day) — the IST-midnight bug
+
+### 3.3 Validation runs on both sides
+
+- [ ] Submitting with no method is refused before any request
+- [ ] The same refusal happens if the request is made directly
+- [ ] An empty selection is refused, not silently ignored
+- [ ] An invalid date is refused
+
+### 3.4 Optimistic + rollback
+
+- [ ] Rows flip to Paid immediately
+- [ ] A server refusal rolls the rows back AND raises a toast
+- [ ] Re-running a batch that is already paid reports it, never
+      double-paying
+
+## 4. Remaining Phase 4 steps
 
 Not yet written — checkboxes open as each step lands.
 
-- [ ] **C** — mark-paid dialog, bulk actions, Zod validation
+- [ ] **C (remainder)** — proof upload (needs the `payment-proofs`
+      bucket), "Export selected", create-payment dialog validation,
+      proof preview
 - [ ] **D** — detail drawer with the `payment_events` timeline, by-employee tab
 - [ ] **E** — CSV export, per-employee statements
 - [ ] **F** — employee "My payments" page
 
-## 4. Known issues still open (do not treat as regressions in 4A/4B)
+## 5. Known issues still open (do not treat as regressions in 4A–4C)
 
 - ~~The "Paid this week" card showed an all-time count.~~ **Fixed in 4B**
   and pinned by a test.
 - `payment_method` is written as `OTHER` because the method picker arrives
   in step C. Existing PAID rows are legitimately `OTHER`.
-- The `payment-proofs` Storage bucket does not exist yet — needed in step C.
+- The `payment-proofs` Storage bucket does not exist yet — needed for
+  proof upload, which is the remaining part of step C.

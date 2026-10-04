@@ -31,6 +31,7 @@ import {
   type LedgerStatus,
 } from "@/lib/payments/adjustments";
 import { toPaise, toRupees } from "@/lib/payments/money";
+import { markPaidSchema, type MarkPaidInput } from "@/validators/schemas";
 
 export interface EmployeeSummary {
   id: string;
@@ -953,7 +954,10 @@ export async function getMyEarnings(
 
 export async function markPaymentsPaidBatch(
   paymentIds: string[],
-  paymentNote?: string
+  paymentNote?: string,
+  paymentMethod: MarkPaidInput["method"] = "OTHER",
+  paidOn?: string,
+  referenceNumber?: string
 ): Promise<
   ActionResponse<{
     marked: number;
@@ -965,8 +969,27 @@ export async function markPaymentsPaidBatch(
     const profile = await requireStaff();
     const supabase = await createClient();
 
-    if (paymentIds.length === 0) return { success: false, error: "No payments selected" };
-    if (paymentIds.length > 100) return { success: false, error: "Select at most 100 payments" };
+    // Server-side validation, not just a client guard: the dialog is not
+    // the boundary.
+    //
+    // Note this action previously wrote only paid_at + paid_by. That was
+    // NOT rejected by payments_paid_complete — verified against the live
+    // database — because the check only constrains rows whose status is
+    // already PAID, and this payload left status at PENDING. The damage
+    // was therefore silent rather than loud: a row whose money had moved
+    // while it still read PENDING in every status filter, tab and total.
+    // Status and the paid_* triple are written together for that reason.
+    const validated = markPaidSchema.safeParse({
+      payment_ids: paymentIds,
+      method: paymentMethod,
+      paid_on: paidOn,
+      reference_number: referenceNumber,
+      note: paymentNote,
+    });
+    if (!validated.success) {
+      return { success: false, error: validated.error.issues[0]?.message ?? "Invalid details" };
+    }
+    const { method, paid_on: paidOnDay } = validated.data;
 
     const { data: rows, error } = await supabase
       .from("payments")
@@ -1001,11 +1024,25 @@ export async function markPaymentsPaidBatch(
       return { success: false, error: "Those payments are already paid" };
     }
 
-    const paidAt = new Date().toISOString();
+    // A chosen calendar day is anchored at midday IST rather than at
+    // midnight, so the stored instant sits in the middle of the day
+    // instead of 5.5 hours from its edge. For Asia/Kolkata a midnight-UTC
+    // anchor happens to land on the same day, so this is robustness
+    // rather than a live bug fix: any ledger timezone with a negative
+    // offset would push a midnight anchor onto the previous day.
+    const paidAt = paidOnDay
+      ? new Date(`${paidOnDay}T12:00:00+05:30`).toISOString()
+      : new Date().toISOString();
     const ids = payable.map((r) => r.id);
     const { error: updateError } = await supabase
       .from("payments")
-      .update({ paid_at: paidAt, paid_by: profile.id })
+      .update({
+        status: "PAID",
+        paid_at: paidAt,
+        paid_by: profile.id,
+        payment_method: method,
+        ...(referenceNumber ? { reference_number: referenceNumber } : {}),
+      })
       .in("id", ids);
 
     if (updateError) {

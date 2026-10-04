@@ -44,6 +44,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -149,6 +150,11 @@ import {
   TASK_STATUS_LABELS,
 } from "@/lib/constants";
 import type { TaskStatus } from "@/types/database";
+import {
+  markPaidSchema,
+  PAYMENT_METHOD_VALUES,
+  type MarkPaidInput,
+} from "@/validators/schemas";
 
 // ──────────────────────────────────────────────
 // Types & small building blocks
@@ -430,6 +436,13 @@ export function AdminPaymentsView() {
   const [bulkIds, setBulkIds] = useState<Set<string>>(new Set());
   const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
   const [bulkWorking, setBulkWorking] = useState(false);
+  // Mark-paid dialog fields. The server validates all of these too, but
+  // validating here means the admin sees the problem before the request
+  // rather than after the round trip.
+  const [paidMethod, setPaidMethod] = useState<MarkPaidInput["method"]>("UPI");
+  const [paidOn, setPaidOn] = useState("");
+  const [paidReference, setPaidReference] = useState("");
+  const [paidFieldError, setPaidFieldError] = useState<string | null>(null);
 
   // ── Create-payment sheet ──
   const [createOpen, setCreateOpen] = useState(false);
@@ -558,6 +571,31 @@ export function AdminPaymentsView() {
     [history, bulkIds]
   );
 
+  /**
+   * Per-employee subtotal for the selection.
+   *
+   * A bulk payout spanning several people is the case where a single
+   * total is genuinely unhelpful — an admin needs to see what each
+   * employee is being paid, and to notice when one person dominates the
+   * batch by accident. Keyed by the SAME label the rows use, so the
+   * dialog and the table cannot name people differently.
+   */
+  const bulkByEmployee = useMemo(() => {
+    const m = new Map<string, { label: string; amount: number; count: number }>();
+    for (const p of history) {
+      if (!bulkIds.has(p.id)) continue;
+      const label = employeeDisplayName({
+        full_name: p.employee_name,
+        email: p.employee_email,
+      });
+      const entry = m.get(label) ?? { label, amount: 0, count: 0 };
+      entry.amount += p.amount;
+      entry.count += 1;
+      m.set(label, entry);
+    }
+    return Array.from(m.values()).sort((a, b) => b.amount - a.amount);
+  }, [history, bulkIds]);
+
   const detail = detailId ? (history.find((p) => p.id === detailId) ?? null) : null;
   const detailEmployeeSheet = employeeSheetId
     ? (employeeRows.find((e) => e.id === employeeSheetId) ?? null)
@@ -682,6 +720,22 @@ export function AdminPaymentsView() {
 
   async function runBulkMarkPaid() {
     if (bulkIds.size === 0) return;
+
+    // Validate in the dialog first. The server repeats this check — this
+    // copy exists purely so an invalid method or date is reported before
+    // the optimistic patch is applied, rather than after it is rolled
+    // back a second later.
+    const check = markPaidSchema.safeParse({
+      payment_ids: Array.from(bulkIds),
+      method: paidMethod,
+      paid_on: paidOn || undefined,
+      reference_number: paidReference || undefined,
+    });
+    if (!check.success) {
+      setPaidFieldError(check.error.issues[0]?.message ?? "Check the details");
+      return;
+    }
+    setPaidFieldError(null);
     setBulkWorking(true);
 
     // ── Optimistic (§38) ──
@@ -707,7 +761,13 @@ export function AdminPaymentsView() {
         : prev
     );
 
-    const result = await markPaymentsPaidBatch(ids);
+    const result = await markPaymentsPaidBatch(
+      ids,
+      paymentNote || undefined,
+      paidMethod,
+      paidOn || undefined,
+      paidReference || undefined
+    );
     setBulkWorking(false);
 
     if (result.success && result.data) {
@@ -2454,6 +2514,67 @@ export function AdminPaymentsView() {
               <span className="tabular-nums">{formatCurrency(bulkTotal)}</span>
             </div>
           </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="paid-method">How was it paid?</Label>
+              <Select
+                value={paidMethod}
+                onValueChange={(v) => setPaidMethod((v ?? "OTHER") as MarkPaidInput["method"])}
+              >
+                <SelectTrigger id="paid-method">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PAYMENT_METHOD_VALUES.map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {PAYMENT_METHOD_LABELS[m]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="paid-on">Paid on</Label>
+              <Input
+                id="paid-on"
+                type="date"
+                value={paidOn}
+                max={new Date().toISOString().slice(0, 10)}
+                onChange={(e) => setPaidOn(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="paid-reference">Reference / UTR (optional)</Label>
+              <Input
+                id="paid-reference"
+                value={paidReference}
+                maxLength={120}
+                placeholder="e.g. UTR 40218837261"
+                onChange={(e) => setPaidReference(e.target.value)}
+              />
+            </div>
+          </div>
+          {paidFieldError && (
+            <p role="alert" className="text-xs font-medium text-destructive">
+              {paidFieldError}
+            </p>
+          )}
+          {bulkByEmployee.length > 1 && (
+            <div className="space-y-1.5 rounded-lg border bg-muted/30 px-3 py-2">
+              <p className="text-xs font-medium text-muted-foreground">Per employee</p>
+              {bulkByEmployee.map((e) => (
+                <div key={e.label} className="flex items-center justify-between text-sm">
+                  <span className="min-w-0 truncate">
+                    {e.label}
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      ({e.count} payment{e.count !== 1 ? "s" : ""})
+                    </span>
+                  </span>
+                  <span className="shrink-0 tabular-nums">{formatCurrency(e.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <DialogFooter>
             <Button
               type="button"
