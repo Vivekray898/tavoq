@@ -17,11 +17,28 @@ import type {
 // Brand
 // ──────────────────────────────────────────────
 
-export const APP_NAME = "Taskora"; // public-facing brand, used verbatim on the consent screen
+/**
+ * Public-facing brand. Rendered verbatim on the Google consent screen, so
+ * it must match the OAuth application name exactly.
+ */
+export const APP_NAME = "Taskora";
 
-export const SUPPORT_EMAIL = process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "support@creativoxa.com"; // public legal contact — replace before submitting to Google
+/**
+ * The monitored address published on the public pages and entered in the
+ * Google Cloud OAuth consent screen. Overridable without a code change so
+ * the value can be corrected in the deployment environment if the mailbox
+ * moves.
+ */
+export const SUPPORT_EMAIL =
+  process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "contact@creativoxa.in";
 
-export const OPERATOR_NAME = process.env.NEXT_PUBLIC_OPERATOR_NAME ?? "Taskora"; // replace with your legal entity name if different
+/**
+ * The entity that operates Taskora, named in the privacy policy. Distinct
+ * from APP_NAME: the product is Taskora, the operator is the company
+ * behind it.
+ */
+export const OPERATOR_NAME =
+  process.env.NEXT_PUBLIC_OPERATOR_NAME ?? "Creativoxa";
 
 // ──────────────────────────────────────────────
 // Status model (§27) — exactly five task statuses
