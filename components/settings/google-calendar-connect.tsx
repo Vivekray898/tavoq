@@ -28,6 +28,13 @@ export function GoogleCalendarConnect() {
 
   const { data, isLoading } = useQuery(googleCalendarOptions);
 
+  // Phase 3: a revoked grant is NOT the same as never having connected.
+  // Both read as "connected: false", so without the explicit state the UI
+  // would show a first-time connect screen to a user whose access simply
+  // expired — and the existing "Connect" button would read as an
+  // invitation rather than a repair.
+  const needsReconnect = data?.state === "needs_reconnect";
+
   // Surface the OAuth result once, on mount, then clean the URL.
   useEffect(() => {
     const result = new URLSearchParams(window.location.search).get("gcal");
@@ -132,9 +139,11 @@ export function GoogleCalendarConnect() {
         <CalendarDays className="size-4" /> Google Calendar
       </h2>
       <p className="mb-3 text-xs text-muted-foreground">
-        {connected
-          ? "Your assigned tasks are kept in sync with your Google Calendar."
-          : "Connect your Google account to see your assigned tasks on your calendar."}
+        {needsReconnect
+          ? "Google access expired or was revoked. Reconnect to resume syncing your tasks."
+          : connected
+            ? "Your assigned tasks are kept in sync with your Google Calendar."
+            : "Connect your Google account to see your assigned tasks on your calendar."}
       </p>
 
       <div className="divide-y rounded-xl border bg-card">
@@ -204,9 +213,18 @@ export function GoogleCalendarConnect() {
           </>
         ) : (
           <div className="flex items-center justify-between gap-4 px-4 py-3.5">
-            <p className="text-xs text-muted-foreground">
-              We only ever create and update your own task events.
-            </p>
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">
+                {needsReconnect
+                  ? "Your Google authorisation is no longer valid, so nothing is syncing right now."
+                  : "We only ever create and update your own task events."}
+              </p>
+              {needsReconnect && data?.googleEmail && (
+                <p className="truncate text-[11px] text-muted-foreground">
+                  Last connected as {data.googleEmail}
+                </p>
+              )}
+            </div>
             <Button
               type="button"
               size="sm"
@@ -219,7 +237,7 @@ export function GoogleCalendarConnect() {
               ) : (
                 <CalendarDays className="size-4" />
               )}
-              Connect
+              {needsReconnect ? "Reconnect" : "Connect"}
             </Button>
           </div>
         )}

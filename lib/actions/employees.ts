@@ -376,14 +376,18 @@ export async function getEmployeeProfile(
 
 /** Any authenticated user: ACTIVE employees for dropdowns (§49) */
 export async function getActiveEmployees(): Promise<
-  ActionResponse<Array<{ id: string; full_name: string; avatar_url: string | null }>>
+  ActionResponse<
+    Array<{ id: string; full_name: string; email: string; avatar_url: string | null }>
+  >
 > {
   try {
     await requireActiveUser();
     const supabase = await createClient();
     const { data, error } = await supabase
       .from("profiles")
-      .select("id, full_name, avatar_url")
+      // email is selected so the UI has a fallback for an employee with
+      // no full_name — without it such a row has no name at all.
+      .select("id, full_name, email, avatar_url")
       .eq("role", "EMPLOYEE")
       .eq("status", "ACTIVE")
       .order("full_name");

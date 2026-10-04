@@ -10,11 +10,14 @@ import {
   IndianRupee,
   MessageSquare,
   RotateCcw,
+  RefreshCw,
+  CalendarX,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Check } from "lucide-react";
 import { EmptyState } from "@/components/shared/empty-state";
 import { PushPermissionCard } from "@/components/notifications/push-permission-card";
+import { NotificationPreferencesCard } from "@/components/notifications/notification-preferences-card";
 import { useNotifications } from "@/components/providers/notifications-provider";
 import { getRelativeTime, cn } from "@/lib/utils";
 import type { NotificationType } from "@/types/database";
@@ -29,6 +32,8 @@ const TYPE_ICONS: Record<NotificationType, typeof Bell> = {
   PAYMENT_PAID: IndianRupee,
   COMMENT_ADDED: MessageSquare,
   PROJECT_ASSIGNED: CheckSquare,
+  TASK_STATUS_CHANGED: RefreshCw,
+  GOOGLE_RECONNECT_REQUIRED: CalendarX,
   ACCOUNT_PENDING: AlertTriangle,
 };
 
@@ -86,6 +91,7 @@ export default function NotificationsPage() {
 
       {/* §19 — browser/system notification opt-in (once per user) */}
       <PushPermissionCard />
+      <NotificationPreferencesCard />
 
       {notifications.length === 0 ? (
         <EmptyState

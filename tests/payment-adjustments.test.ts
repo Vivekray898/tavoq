@@ -34,7 +34,7 @@ const row = (over: Partial<PaymentLedgerRow> = {}): PaymentLedgerRow => ({
   created_at: "2026-10-01T10:00:00Z",
   kind: "PAYMENT",
   parent_payment_id: null,
-  employee: [{ full_name: "Asha" }],
+  employee: [{ full_name: "Asha", email: "asha@example.com" }],
   paid_by_profile: null,
   task: {
     id: "task-1",

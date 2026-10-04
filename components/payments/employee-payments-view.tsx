@@ -15,6 +15,7 @@ import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { myEarningsOptions } from "@/lib/queries/options";
 import { formatCurrency, cn } from "@/lib/utils";
 import type { PaymentItem } from "@/lib/payments/adjustments";
+import { toPaise } from "@/lib/payments/money";
 
 /**
  * §12 — employee earnings, mobile-first. Shows BOTH payment kinds
@@ -154,6 +155,9 @@ export function EmployeePaymentsView() {
                         kind: item.kind,
                         employee_id: null,
                         employee_name: null,
+                        // An employee never sees a colleague's row, so
+                        // this detail sheet has no identity to label.
+                        employee_email: null,
                         task_id: null,
                         client_name: null,
                         label: item.label,
@@ -168,6 +172,12 @@ export function EmployeePaymentsView() {
                         status: item.status,
                         paid_at: item.paid_at,
                         payment_note: item.payment_note,
+                        amount_paise: toPaise(item.amount),
+                        base_amount_paise: toPaise(item.amount - item.adjustment_total),
+                        type: item.kind === "CUSTOM" ? "CUSTOM" : "TASK_PAYOUT",
+                        method: null,
+                        reference_number: null,
+                        due_date: null,
                       })
                     }
                     className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/50"

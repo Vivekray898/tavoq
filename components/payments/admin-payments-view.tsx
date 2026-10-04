@@ -17,9 +17,9 @@
  * No polling, no router.refresh, no duplicate subscriptions.
  */
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BadgeCheck,
@@ -105,7 +105,7 @@ import {
 } from "@/components/shared/page-toolbar";
 import { DetailSheet } from "@/components/shared/detail-sheet";
 import { ErrorMessage } from "@/components/shared/error-message";
-import { PaymentStatusBadge } from "@/components/shared/status-badge";
+import { LedgerStatusBadge } from "@/components/shared/status-badge";
 import { EntityAvatar } from "@/components/shared/entity-avatar";
 import {
   createCustomPayment,
@@ -121,6 +121,12 @@ import {
   recomputeSummary,
   type PaymentItem,
 } from "@/lib/payments/adjustments";
+import {
+  dateColumnLabel,
+  employeeDisplayName,
+  employeeInitials,
+  paymentSubLine,
+} from "@/lib/payments/display";
 import { isStaff } from "@/lib/permissions";
 import { useSession } from "@/components/providers/session-provider";
 import {
@@ -137,18 +143,22 @@ import {
   formatDate,
   formatRelativeTime,
 } from "@/lib/utils";
-import { TASK_STATUS_DOTS, TASK_STATUS_LABELS } from "@/lib/constants";
+import {
+  PAYMENT_METHOD_LABELS,
+  TASK_STATUS_DOTS,
+  TASK_STATUS_LABELS,
+} from "@/lib/constants";
 import type { TaskStatus } from "@/types/database";
 
 // ──────────────────────────────────────────────
 // Types & small building blocks
 // ──────────────────────────────────────────────
 
-type StatusFilter = "ALL" | "PENDING" | "PAID";
+type StatusFilter = "ALL" | "PENDING" | "PAID" | "CANCELLED";
 type TypeFilter = "ALL" | "TASK" | "CUSTOM";
 type DateFilter = "ALL" | "WEEK" | "MONTH" | "QUARTER";
 type SortKey = "NEWEST" | "OLDEST" | "AMOUNT_DESC" | "AMOUNT_ASC";
-type WorkspaceTab = "payments" | "pending" | "paid" | "employees";
+type WorkspaceTab = "payments" | "pending" | "paid" | "cancelled" | "employees";
 
 /** Task payout vs custom payment — always explicit. */
 function PaymentKindBadge({
@@ -201,18 +211,43 @@ function AdjustmentHint({ item }: { item: PaymentItem }) {
   );
 }
 
+/**
+ * The employee a payment is for.
+ *
+ * One helper decides the label for every screen, so the same person can
+ * never appear as "Priya Sharma" here and "EMPLOYEE" elsewhere. See
+ * lib/payments/display.ts for why the role string and initials are not
+ * acceptable fallbacks.
+ */
+/**
+ * How the money was paid, shown only on settled rows.
+ *
+ * A settled payment with no recorded method is the normal case until the
+ * mark-paid dialog exists (step C), where everything is written as OTHER.
+ * Rendering nothing would make a genuine method indistinguishable from a
+ * missing one, so an explicit "Other" is shown instead.
+ */
+function MethodBadge({ method }: { method: PaymentItem["method"] }) {
+  return (
+    <Badge variant="outline" className="gap-1 text-[10px] font-medium text-muted-foreground">
+      {method ? PAYMENT_METHOD_LABELS[method] : "Not recorded"}
+    </Badge>
+  );
+}
+
 function EmployeeCell({
-  name,
+  employee,
   avatarUrl,
 }: {
-  name: string | null;
+  employee: { full_name?: string | null; email?: string | null } | null | undefined;
   avatarUrl?: string | null;
 }) {
-  if (!name) return <span className="text-muted-foreground">—</span>;
+  if (!employee) return <span className="text-muted-foreground">Unassigned</span>;
+  const label = employeeDisplayName(employee);
   return (
     <span className="flex min-w-0 items-center gap-2">
-      <EntityAvatar name={name} src={avatarUrl} size="sm" />
-      <span className="truncate text-sm">{name}</span>
+      <EntityAvatar name={employeeInitials(employee)} src={avatarUrl} size="sm" />
+      <span className="truncate text-sm">{label}</span>
     </span>
   );
 }
@@ -223,11 +258,14 @@ function Metric({
   amount,
   sub,
   tone,
+  delta,
 }: {
   label: string;
   amount: number;
   sub: string;
   tone?: "pending" | "default";
+  /** Signed change vs the previous period; omitted when not comparable. */
+  delta?: { amount: number; text: string } | null;
 }) {
   return (
     <div className="min-w-0">
@@ -241,15 +279,54 @@ function Metric({
         {formatCurrency(amount)}
       </p>
       <p className="mt-0.5 text-[11px] text-muted-foreground">{sub}</p>
+      {delta && delta.amount !== 0 && (
+        <p
+          className={cn(
+            "mt-0.5 flex items-center gap-1 text-[11px] font-medium",
+            delta.amount > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"
+          )}
+        >
+          {delta.amount > 0 ? (
+            <TrendingUp className="size-3" />
+          ) : (
+            <TrendingDown className="size-3" />
+          )}
+          {delta.text}
+        </p>
+      )}
     </div>
   );
 }
 
-/** Row date: paid date when settled, created date while pending. */
-function rowDate(p: PaymentItem): { date: string | null; label: string } {
-  return p.status === "PAID" && p.paid_at
-    ? { date: p.paid_at, label: "Paid" }
-    : { date: p.created_at ?? null, label: "Created" };
+/**
+ * Count beside a tab label.
+ *
+ * Rendered as a separate element rather than interpolated text so the
+ * number is visually subordinate to the label and reads the same at
+ * every count, including 0 — a tab that silently disappears when empty
+ * looks like a bug.
+ */
+function TabCount({ value }: { value: number }) {
+  return (
+    <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+      {value}
+    </span>
+  );
+}
+
+/**
+ * Which date a row shows, and what to call it.
+ *
+ * The label travels with the value on purpose: a pending row has no
+ * paid_at, so it fell back to created_at and rendered with the same bare
+ * date as a settled row. Callers get the wording rather than having to
+ * re-derive it, so the desktop table, the mobile card and the sort order
+ * cannot disagree about which field they are looking at.
+ */
+function rowDate(p: PaymentItem): { date: string | null; label: string; hint: string } {
+  const resolved = dateColumnLabel({ status: p.status, paid_at: p.paid_at });
+  if (resolved.value) return { date: resolved.value, label: resolved.label, hint: resolved.hint };
+  return { date: p.created_at ?? null, label: resolved.label, hint: resolved.hint };
 }
 
 function withinDateFilter(dateIso: string | null, filter: DateFilter): boolean {
@@ -286,14 +363,68 @@ export function AdminPaymentsView() {
 
   const { data, isLoading, isError, refetch } = useQuery(paymentWorkspaceOptions);
 
-  // ── Workspace state (all client-side; the cache is the source of truth) ──
-  const [tab, setTab] = useState<WorkspaceTab>("payments");
-  const [typeFilter, setTypeFilter] = useState<TypeFilter>("ALL");
-  const [employeeFilter, setEmployeeFilter] = useState<string>("ALL");
-  const [dateFilter, setDateFilter] = useState<DateFilter>("ALL");
-  const [sortKey, setSortKey] = useState<SortKey>("NEWEST");
-  const [search, setSearch] = useState("");
+  // ── Workspace state ──
+  //
+  // Filter state lives in the URL, not in useState, so a filtered
+  // payments view can be shared, bookmarked and restored by the back
+  // button — and so an export in step E can read the same definition of
+  // "the current view" from the URL instead of guessing at component
+  // state. The query cache is still the data source; only the *view*
+  // definition is in the URL.
+  const searchParams = useSearchParams();
+
+  const tab = (searchParams.get("tab") as WorkspaceTab | null) ?? "payments";
+  const typeFilter = (searchParams.get("type") as TypeFilter | null) ?? "ALL";
+  const employeeFilter = searchParams.get("employee") ?? "ALL";
+  const dateFilter = (searchParams.get("date") as DateFilter | null) ?? "ALL";
+  const sortKey = (searchParams.get("sort") as SortKey | null) ?? "NEWEST";
+  const search = searchParams.get("q") ?? "";
   const [filtersOpen, setFiltersOpen] = useState(false);
+
+  /**
+   * Write a patch of the filter state back to the URL.
+   *
+   * Every setter in the toolbar funnels through here. Values equal to
+   * their default are DELETED rather than written as `?type=ALL`, so a
+   * default view has a clean URL and one shared link always describes
+   * exactly the same set of rows. scroll: false keeps the list from
+   * jumping to the top while someone types in the search box.
+   */
+  const setParam = useCallback(
+    (key: string, value: string | null, defaultValue: string) => {
+      const next = new URLSearchParams(searchParams.toString());
+      if (value === null || value === "" || value === defaultValue) next.delete(key);
+      else next.set(key, value);
+      const qs = next.toString();
+      router.replace(qs ? `/payments?${qs}` : "/payments", { scroll: false });
+    },
+    [router, searchParams]
+  );
+
+  const setTab = useCallback(
+    (v: WorkspaceTab) => setParam("tab", v === "payments" ? null : v, "payments"),
+    [setParam]
+  );
+  const setTypeFilter = useCallback(
+    (v: TypeFilter) => setParam("type", v === "ALL" ? null : v, "ALL"),
+    [setParam]
+  );
+  const setEmployeeFilter = useCallback(
+    (v: string) => setParam("employee", v === "ALL" ? null : v, "ALL"),
+    [setParam]
+  );
+  const setDateFilter = useCallback(
+    (v: DateFilter) => setParam("date", v === "ALL" ? null : v, "ALL"),
+    [setParam]
+  );
+  const setSortKey = useCallback(
+    (v: SortKey) => setParam("sort", v === "NEWEST" ? null : v, "NEWEST"),
+    [setParam]
+  );
+  const setSearch = useCallback(
+    (v: string) => setParam("q", v || null, ""),
+    [setParam]
+  );
 
   // ── Bulk selection over pending rows ──
   const [bulkIds, setBulkIds] = useState<Set<string>>(new Set());
@@ -368,12 +499,24 @@ export function AdminPaymentsView() {
       all: history.length,
       pending: history.filter((p) => p.status === "PENDING").length,
       paid: history.filter((p) => p.status === "PAID").length,
+      // Migration 025 made CANCELLED a real status. Without a tab it was
+      // unreachable from the UI — visible only in totals.
+      cancelled: history.filter((p) => p.status === "CANCELLED").length,
+      employees: employeeRows.length,
     }),
-    [history]
+    [history, employeeRows]
   );
 
+  // A tab is a status shortcut, so the Cancelled tab needs a status the
+  // old StatusFilter union did not contain.
   const tabStatus: StatusFilter =
-    tab === "pending" ? "PENDING" : tab === "paid" ? "PAID" : "ALL";
+    tab === "pending"
+      ? "PENDING"
+      : tab === "paid"
+        ? "PAID"
+        : tab === "cancelled"
+          ? "CANCELLED"
+          : "ALL";
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -492,6 +635,7 @@ export function AdminPaymentsView() {
           return applyAdjustmentToItem(p, {
             id: created.id,
             amount: created.amount,
+            amount_paise: created.amount_paise,
             reason: adjustReason.trim(),
             created_at: created.created_at ?? new Date().toISOString(),
             actor_name: null,
@@ -668,15 +812,30 @@ export function AdminPaymentsView() {
   // Employee list for the create sheet (cached)
   // ────────────────────────────────────────────
 
+  /**
+   * Every employee the workspace can label, deduplicated across the
+   * active-employees cache and the workspace rollup.
+   *
+   * The name is resolved HERE, once, through employeeDisplayName, rather
+   * than at each of the ~12 places that render it. The two sources can
+   * disagree — the rollup only knows `full_name`, while the cache also
+   * carries an email — so resolving downstream is how the by-employee
+   * tab, the filter dropdown and the picker end up showing different
+   * labels for one person. Cache wins on conflict because it is the
+   * fresher read.
+   */
   const employeeOptions = useMemo(() => {
     const fromCache = (employeesQuery.data ?? []).map((e) => ({
       id: e.id,
-      name: e.full_name,
+      name: employeeDisplayName({ full_name: e.full_name, email: e.email }),
       avatar_url: e.avatar_url,
     }));
     const fromWorkspace = employeeRows.map((e) => ({
       id: e.id,
-      name: e.name,
+      // The rollup carries no email, so a nameless employee lands on
+      // "Unassigned" here; the cache entry above overwrites it with the
+      // email-derived label when both sources have the person.
+      name: employeeDisplayName({ full_name: e.name }),
       avatar_url: avatarById.get(e.id) ?? null,
     }));
     const merged = new Map<string, { id: string; name: string; avatar_url: string | null }>();
@@ -819,15 +978,29 @@ export function AdminPaymentsView() {
                   return next;
                 })
               }
-              aria-label={`Select payment for ${p.employee_name ?? "employee"}`}
+              aria-label={`Select payment for ${employeeDisplayName({
+                    full_name: p.employee_name,
+                    email: p.employee_email,
+                  })}`}
             />
           )}
         </DataTableCell>
         <DataTableCell flex className="max-w-52">
-          <DataTableText primary={p.label} secondary={p.payment_note} />
+          <DataTableText
+            primary={p.label}
+            secondary={paymentSubLine({
+              kind: p.kind,
+              label: p.label,
+              project_name: p.project_name,
+              client_name: p.client_name,
+            })}
+          />
         </DataTableCell>
         <DataTableCell column="employee">
-          <EmployeeCell name={p.employee_name} avatarUrl={avatarById.get(p.employee_id ?? "")} />
+          <EmployeeCell
+            employee={{ full_name: p.employee_name, email: p.employee_email }}
+            avatarUrl={avatarById.get(p.employee_id ?? "")}
+          />
         </DataTableCell>
         <DataTableCell column="type">
           <PaymentKindBadge kind={p.kind} adjusted={(p.adjustments?.length ?? 0) > 0} />
@@ -848,12 +1021,22 @@ export function AdminPaymentsView() {
           <AdjustmentHint item={p} />
         </DataTableCell>
         <DataTableCell>
-          <PaymentStatusBadge status={p.status} withIcon />
+          <LedgerStatusBadge status={p.status} withIcon />
+          {p.status === "PAID" && (
+            <span className="mt-1 block">
+              <MethodBadge method={p.method} />
+            </span>
+          )}
         </DataTableCell>
-        <DataTableCell numeric>
-          <span title={rd.date ? formatAbsoluteTime(rd.date) : undefined}>
-            {rd.date ? formatDate(rd.date) : "—"}
+        {/* The label sits in the cell rather than living only in a
+            tooltip: a tooltip is unreachable on touch and is not read
+            reliably by screen readers, and this column mixes two
+            different timestamps. */}
+        <DataTableCell numeric title={`${rd.hint}${rd.date ? ` ${formatAbsoluteTime(rd.date)}` : ""}`}>
+          <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">
+            {rd.label}
           </span>
+          <span>{rd.date ? formatDate(rd.date) : "—"}</span>
           <span className="block text-[11px] text-muted-foreground">
             {rd.date ? formatRelativeTime(rd.date) : ""}
           </span>
@@ -921,7 +1104,10 @@ export function AdminPaymentsView() {
                       return next;
                     })
                   }
-                  aria-label={`Select payment for ${p.employee_name ?? "employee"}`}
+                  aria-label={`Select payment for ${employeeDisplayName({
+                    full_name: p.employee_name,
+                    email: p.employee_email,
+                  })}`}
                 />
               </div>
             )}
@@ -931,8 +1117,16 @@ export function AdminPaymentsView() {
               className="min-w-0 flex-1 text-left"
             >
               <p className="truncate text-sm font-medium">{p.label}</p>
+              <p className="truncate text-[13px] text-muted-foreground">
+                {employeeDisplayName({
+                  full_name: p.employee_name,
+                  email: p.employee_email,
+                })}
+                {p.project_name ? ` · ${p.project_name}` : ""}
+              </p>
               <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                {p.employee_name ?? "—"} · {p.kind === "TASK" ? "Task payout" : "Custom"}
+                {employeeDisplayName({ full_name: p.employee_name, email: p.employee_email })} ·{" "}
+                  {p.kind === "TASK" ? "Task payout" : "Custom"}
               </p>
               <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
                 {p.project_name && <span>{p.project_name}</span>}
@@ -948,8 +1142,9 @@ export function AdminPaymentsView() {
             <div className="text-right">
               <p className="text-sm font-semibold tabular-nums">{formatCurrency(p.amount)}</p>
               <AdjustmentHint item={p} />
-              <div className="mt-0.5 flex justify-end">
-                <PaymentStatusBadge status={p.status} withIcon />
+              <div className="mt-0.5 flex flex-col items-end gap-1">
+                <LedgerStatusBadge status={p.status} withIcon />
+                {p.status === "PAID" && <MethodBadge method={p.method} />}
               </div>
             </div>
             <DropdownMenu>
@@ -1012,6 +1207,31 @@ export function AdminPaymentsView() {
       </div>
     </div>
   );
+
+  /**
+   * Every selectable row in the CURRENT filtered view.
+   *
+   * "Select all" must respect the filters, not select the whole
+   * ledger: a bulk action then reports and acts on exactly what the
+   * admin can see. Only PENDING rows qualify, because a settled or
+   * cancelled payment cannot be marked paid — including those would
+   * silently no-op server-side.
+   */
+  const selectableIds = useMemo(
+    () => filtered.filter((p) => p.status === "PENDING").map((p) => p.id),
+    [filtered]
+  );
+  const allSelectableSelected =
+    selectableIds.length > 0 && selectableIds.every((id) => bulkIds.has(id));
+
+  const toggleSelectAllMatching = () => {
+    setBulkIds((prev) => {
+      const next = new Set(prev);
+      if (allSelectableSelected) for (const id of selectableIds) next.delete(id);
+      else for (const id of selectableIds) next.add(id);
+      return next;
+    });
+  };
 
   const pendingSelectHint =
     bulkIds.size === 0 && counts.pending > 1 ? (
@@ -1119,21 +1339,34 @@ export function AdminPaymentsView() {
           sub={`${summary.pendingCount} payment${summary.pendingCount !== 1 ? "s" : ""}`}
           tone="pending"
         />
+        {/* The sub-line MUST count the same window as the amount above it.
+            This previously read `counts.paid`, the all-time total, so a
+            week containing one payout was captioned "3 payments total".
+            `paidThisWeekCount` comes from the same SQL window as
+            `paidThisWeek`. */}
         <Metric
           label="Paid this week"
           amount={summary.paidThisWeek}
-          sub={`${counts.paid} payment${counts.paid !== 1 ? "s" : ""} total`}
+          sub={`${summary.paidThisWeekCount} payment${summary.paidThisWeekCount !== 1 ? "s" : ""} this week`}
+          delta={{
+            amount: summary.paidThisWeek - summary.paidLastWeek,
+            text: `${summary.paidThisWeek >= summary.paidLastWeek ? "up" : "down"} from last week`,
+          }}
         />
         <Metric
           label="Paid this month"
           amount={summary.paidThisMonth}
-          sub={
-            summary.paidThisMonth > 0 && summary.paidTotal > 0
-              ? `${Math.round((summary.paidThisMonth / summary.paidTotal) * 100)}% of all time`
-              : "—"
-          }
+          sub={`${summary.paidThisMonthCount} payment${summary.paidThisMonthCount !== 1 ? "s" : ""} this month`}
+          delta={{
+            amount: summary.paidThisMonth - summary.paidLastMonth,
+            text: `${summary.paidThisMonth >= summary.paidLastMonth ? "up" : "down"} from last month`,
+          }}
         />
-        <Metric label="Total paid" amount={summary.paidTotal} sub="All time" />
+        <Metric
+          label="Total paid"
+          amount={summary.paidTotal}
+          sub={`${counts.paid} payment${counts.paid !== 1 ? "s" : ""} all time`}
+        />
       </div>
 
       {/* ── Workspace tabs ─────────────────────────────────── */}
@@ -1145,10 +1378,21 @@ export function AdminPaymentsView() {
         }}
       >
         <TabsList>
-          <TabsTrigger value="payments">All {counts.all}</TabsTrigger>
-          <TabsTrigger value="pending">Pending {counts.pending}</TabsTrigger>
-          <TabsTrigger value="paid">Paid {counts.paid}</TabsTrigger>
-          <TabsTrigger value="employees">Employees</TabsTrigger>
+          <TabsTrigger value="payments">
+            All <TabCount value={counts.all} />
+          </TabsTrigger>
+          <TabsTrigger value="pending">
+            Pending <TabCount value={counts.pending} />
+          </TabsTrigger>
+          <TabsTrigger value="paid">
+            Paid <TabCount value={counts.paid} />
+          </TabsTrigger>
+          <TabsTrigger value="cancelled">
+            Cancelled <TabCount value={counts.cancelled} />
+          </TabsTrigger>
+          <TabsTrigger value="employees">
+            By employee <TabCount value={counts.employees} />
+          </TabsTrigger>
         </TabsList>
       </Tabs>
 
@@ -1230,6 +1474,20 @@ export function AdminPaymentsView() {
               </Select>
             </ToolbarFilters>
             <ToolbarActions>
+              {selectableIds.length > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={toggleSelectAllMatching}
+                  className="text-xs"
+                >
+                  <CheckCheck className="size-3.5" />
+                  {allSelectableSelected
+                    ? "Clear selection"
+                    : `Select all ${selectableIds.length} pending`}
+                </Button>
+              )}
               {pendingSelectHint}
               <Button
                 type="button"
@@ -1294,7 +1552,9 @@ export function AdminPaymentsView() {
                     <DataTableHead column="project">Project</DataTableHead>
                     <DataTableHead numeric>Amount</DataTableHead>
                     <DataTableHead>Status</DataTableHead>
-                    <DataTableHead numeric>Date</DataTableHead>
+                    <DataTableHead numeric title="A settled payment shows when it was paid. Anything else shows when the payment was recorded.">
+                      Paid on / created
+                    </DataTableHead>
                     <DataTableHead className="w-10" />
                   </DataTableRow>
                 </DataTableHeader>
@@ -1356,7 +1616,7 @@ export function AdminPaymentsView() {
                         >
                           <TableCell>
                             <EmployeeCell
-                              name={e.name}
+                              employee={{ full_name: e.name }}
                               avatarUrl={avatarById.get(e.id)}
                             />
                           </TableCell>
@@ -1448,7 +1708,7 @@ export function AdminPaymentsView() {
               {createEmployee ? (
                 <div className="flex items-center justify-between gap-2 rounded-lg border bg-muted/30 px-3 py-2.5">
                   <EmployeeCell
-                    name={createEmployee.name}
+                    employee={{ full_name: createEmployee.name }}
                     avatarUrl={createEmployee.avatar_url}
                   />
                   <button
@@ -1492,7 +1752,7 @@ export function AdminPaymentsView() {
                             }}
                             className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-accent/50"
                           >
-                            <EmployeeCell name={e.name} avatarUrl={e.avatar_url} />
+                            <EmployeeCell employee={{ full_name: e.name }} avatarUrl={e.avatar_url} />
                             {row && row.pending > 0 && (
                               <span className="shrink-0 text-xs font-medium tabular-nums text-status-warning">
                                 {formatCurrency(row.pending)} pending
@@ -1847,7 +2107,7 @@ export function AdminPaymentsView() {
                       </p>
                     ) : null}
                   </div>
-                  <PaymentStatusBadge status={detail.status} />
+                  <LedgerStatusBadge status={detail.status} />
                 </div>
 
                 {/* Adjustment trail — the append-only history of every
@@ -1902,7 +2162,12 @@ export function AdminPaymentsView() {
                 <dl className="space-y-3 rounded-lg border bg-card px-3.5 py-3 text-sm">
                   <div className="flex items-center justify-between gap-4">
                     <dt className="text-muted-foreground">Employee</dt>
-                    <dd className="font-medium">{detail.employee_name ?? "—"}</dd>
+                    <dd className="font-medium">
+                      {employeeDisplayName({
+                        full_name: detail.employee_name,
+                        email: detail.employee_email,
+                      })}
+                    </dd>
                   </div>
                   <div className="flex items-center justify-between gap-4">
                     <dt className="text-muted-foreground">Type</dt>
@@ -2085,6 +2350,13 @@ export function AdminPaymentsView() {
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">{p.label}</p>
+              <p className="truncate text-[13px] text-muted-foreground">
+                {employeeDisplayName({
+                  full_name: p.employee_name,
+                  email: p.employee_email,
+                })}
+                {p.project_name ? ` · ${p.project_name}` : ""}
+              </p>
                         <p className="truncate text-xs text-muted-foreground">
                           {p.kind === "TASK" ? "Task payout" : "Custom"}
                           {p.project_name ? ` · ${p.project_name}` : ""}
@@ -2132,6 +2404,13 @@ export function AdminPaymentsView() {
                       >
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium">{p.label}</p>
+              <p className="truncate text-[13px] text-muted-foreground">
+                {employeeDisplayName({
+                  full_name: p.employee_name,
+                  email: p.employee_email,
+                })}
+                {p.project_name ? ` · ${p.project_name}` : ""}
+              </p>
                           <p className="truncate text-xs text-muted-foreground">
                             {rd.date ? `${rd.label} ${formatDate(rd.date)}` : "Pending"}
                           </p>
@@ -2165,7 +2444,7 @@ export function AdminPaymentsView() {
               .map((p) => (
                 <div key={p.id} className="flex items-center justify-between gap-3 px-3 py-2">
                   <span className="min-w-0 flex-1 truncate">
-                    {p.employee_name ?? "—"} · {p.label}
+                    {employeeDisplayName({ full_name: p.employee_name, email: p.employee_email })} · {p.label}
                   </span>
                   <span className="shrink-0 tabular-nums">{formatCurrency(p.amount)}</span>
                 </div>
@@ -2311,7 +2590,12 @@ export function AdminPaymentsView() {
           <DialogHeader>
             <DialogTitle>Adjust paid amount</DialogTitle>
             <DialogDescription>
-              {adjustmentTarget?.employee_name ?? "This employee"} was paid{" "}
+              {adjustmentTarget
+                ? employeeDisplayName({
+                    full_name: adjustmentTarget.employee_name,
+                    email: adjustmentTarget.employee_email,
+                  })
+                : "This employee"}{" "}was paid{" "}
               {formatCurrency(adjustmentTarget?.base_amount ?? 0)} for this payment.
               Record a bonus or a deduction — the original payment is never edited.
             </DialogDescription>

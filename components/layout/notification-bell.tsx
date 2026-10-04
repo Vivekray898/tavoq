@@ -11,6 +11,8 @@ import {
   IndianRupee,
   MessageSquare,
   RotateCcw,
+  RefreshCw,
+  CalendarX,
 } from "lucide-react";
 import {
   Popover,
@@ -32,6 +34,8 @@ const TYPE_ICONS: Record<NotificationType, typeof Bell> = {
   PAYMENT_PAID: IndianRupee,
   COMMENT_ADDED: MessageSquare,
   PROJECT_ASSIGNED: CheckSquare,
+  TASK_STATUS_CHANGED: RefreshCw,
+  GOOGLE_RECONNECT_REQUIRED: CalendarX,
   ACCOUNT_PENDING: AlertTriangle,
 };
 

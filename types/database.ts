@@ -73,6 +73,19 @@ export type ActivityType =
 
 export type TaskView = "list" | "board" | "calendar" | "table";
 
+import type {
+  LedgerStatus,
+  LedgerPaymentType,
+  PaymentMethod,
+} from "@/lib/payments/adjustments";
+
+/**
+ * `tasks.payment_status` — whether a TASK's payout is owed.
+ *
+ * NOT the ledger row's status. A payments row can be CANCELLED; a task
+ * cannot, so these are separate enums (migration 025) and separate label
+ * maps (PAYMENT_STATUS_LABELS vs LEDGER_STATUS_LABELS).
+ */
 export type PaymentStatus = "NOT_APPLICABLE" | "PENDING" | "PAID";
 
 export type NotificationType =
@@ -85,6 +98,8 @@ export type NotificationType =
   | "PAYMENT_PAID"
   | "COMMENT_ADDED"
   | "PROJECT_ASSIGNED"
+  | "TASK_STATUS_CHANGED"
+  | "GOOGLE_RECONNECT_REQUIRED"
   | "ACCOUNT_PENDING";
 
 export type DevicePlatform = "ANDROID" | "IOS";
@@ -194,12 +209,68 @@ export interface TaskAttachment {
 
 export interface Payment {
   id: string;
-  task_id: string;
+  task_id: string | null;
+  /**
+   * Legacy rupee amount (NUMERIC 10,2).
+   *
+   * Kept only for the dual-write window: a BEFORE INSERT/UPDATE trigger
+   * derives it from `amount_paise`, so it can never drift. Do not write it
+   * by hand and do not compute totals from it — use `amount_paise`.
+   * Dropped in a later migration.
+   */
   amount: number;
+  /** Authoritative amount in integer paise (₹1,250.00 → 125000). */
+  amount_paise: number;
+  status: LedgerStatus;
+  /** UI-facing classification; distinct from the `kind` DB marker. */
+  type: LedgerPaymentType;
+  /** DB-level marker: a real payout, or a correction to one. */
+  kind: "PAYMENT" | "ADJUSTMENT";
+  parent_payment_id: string | null;
+  employee_id: string | null;
+  /** Who receives the money. Equals employee_id today. */
+  payee: string;
+  /** Who filed the row. */
+  created_by: string | null;
+  currency: string;
+  /** Required whenever status is PAID (payments_paid_complete). */
+  payment_method: PaymentMethod | null;
+  /** UTR / transaction id. Optional. */
+  reference_number: string | null;
+  due_date: string | null;
+  cancelled_at: string | null;
+  /** Required whenever status is CANCELLED. */
+  cancel_reason: string | null;
+  notes: string | null;
+  /** Object path in the private payment-proofs bucket, not a URL. */
+  proof_path: string | null;
+  project_id: string | null;
   paid_at: string | null;
   paid_by: string | null;
   payment_note: string | null;
   created_at: string;
+}
+
+export interface PaymentEvent {
+  id: string;
+  payment_id: string;
+  actor_id: string | null;
+  action: "CREATED" | "PAID" | "REVERSED" | "CANCELLED" | "UPDATED";
+  from_status: LedgerStatus | null;
+  to_status: LedgerStatus | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+/** Row shape returned by mark_payments_paid — one entry per input id. */
+export interface MarkPaymentsPaidResult {
+  payment_id: string;
+  /**
+   * 'paid' — this call moved it.
+   * 'skipped' — already PAID (idempotent re-run, cannot double-pay).
+   * 'cancelled' — was CANCELLED, left untouched.
+   */
+  outcome: "paid" | "skipped" | "cancelled";
 }
 
 export interface Notification {

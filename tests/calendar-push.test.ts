@@ -138,16 +138,35 @@ describe("syncAssigneeCalendar", () => {
 describe("a revoked Google grant fails cleanly instead of erroring forever", () => {
   const gcal = () => strip(read("../lib/actions/google-calendar.ts"));
 
-  test("a permanently invalid refresh token clears the token row", () => {
+  test("a permanently invalid refresh token is recorded, not erased", () => {
+    // CHANGED IN PHASE 3. This previously asserted the row was DELETED.
+    // Deleting it destroyed the evidence that the user had ever connected,
+    // so the UI could only ever say "not connected" — sending them back
+    // through consent for a problem they did not cause, with no way to
+    // distinguish it from a first-time setup. Migration 024 adds
+    // google_connections so the row survives with an explicit status.
+    //
+    // The requirement this test still guards is unchanged and important:
+    // the sync must NOT keep retrying the dead grant forever.
     const src = gcal();
     assert.match(src, /PERMANENT_TOKEN_ERRORS/);
     assert.match(src, /invalid_grant/);
-    // The dead row must be DELETED, or the UI keeps claiming the
-    // calendar is connected and every sync fails the same way forever.
     const revoked = src.slice(src.indexOf("PERMANENT_TOKEN_ERRORS.has(json.error)"));
-    const del = revoked.slice(0, 600);
-    assert.match(del, /user_google_tokens/);
-    assert.match(del, /\.delete\(\)/);
+    const after = revoked.slice(0, 600);
+    assert.match(after, /markNeedsReconnect/);
+    // Still throws, so callers stop rather than looping.
+    assert.match(after, /GoogleAuthRevokedError/);
+    // ...and no longer erases the row on a failed refresh.
+    assert.doesNotMatch(after, /user_google_tokens/);
+  });
+
+  test("an explicit disconnect still deletes the row", () => {
+    // Opt-out is not failure: the user asked for this, so removing the
+    // token is correct and must not be confused with a dead grant.
+    const src = gcal();
+    const fn = src.slice(src.indexOf("export async function disconnectGoogleCalendar"));
+    assert.match(fn, /user_google_tokens/);
+    assert.match(fn, /\.delete\(\)/);
   });
 
   test("permanent errors are distinguished from a transient Google outage", () => {
@@ -391,7 +410,10 @@ describe("payments notify over push", () => {
 });
 
 describe("service worker push handler", () => {
-  const sw = () => strip(read("../public/sw.js"));
+  // Phase 1 moved the worker from the hand-rolled public/sw.js to the Serwist
+  // source at app/sw.ts. The push contract these assertions cover is unchanged,
+  // so the assertions themselves are kept as-is — only the file under test moved.
+  const sw = () => strip(read("../app/sw.ts"));
 
   test("handles push and notificationclick", () => {
     const src = sw();

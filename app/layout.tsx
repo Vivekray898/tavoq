@@ -1,3 +1,4 @@
+import { SerwistProvider } from "@serwist/turbopack/react";
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
@@ -25,6 +26,10 @@ export const metadata: Metadata = {
   description: "Simple team work management for your agency.",
   manifest: "/manifest.json",
   applicationName: "Taskora",
+  // Stop iOS treating task numbers as phone numbers.
+  formatDetection: {
+    telephone: false,
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
@@ -42,7 +47,9 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
+  // maximumScale is deliberately NOT set. Pinning it to 1 disables pinch-zoom,
+  // which fails WCAG 1.4.4 and Lighthouse's viewport audit. viewportFit: "cover"
+  // still gives the notch/safe-area handling the install prompt relies on.
   viewportFit: "cover",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
@@ -66,11 +73,13 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <QueryProvider>
-            {children}
-            <PwaBootstrap />
-            <Toaster position="top-center" richColors closeButton />
-          </QueryProvider>
+          <SerwistProvider swUrl="/serwist/sw.js">
+            <QueryProvider>
+              {children}
+              <PwaBootstrap />
+              <Toaster position="top-center" richColors closeButton />
+            </QueryProvider>
+          </SerwistProvider>
         </ThemeProvider>
       </body>
     </html>

@@ -44,9 +44,11 @@ feature uses a handful per sync, so the limit is never a concern.
    - **App name**: `Taskora`
    - **User support email**: your email
    - **Developer contact email**: your email
-4. Under **Data Access**, click **Add or remove scopes** and add both:
+4. Under **Data Access**, click **Add or remove scopes** and add:
    - `https://www.googleapis.com/auth/calendar.events`
-   - `https://www.googleapis.com/auth/calendar`
+   
+   This is the only scope the code requests. Every endpoint it calls
+   (`/events`, `/events?`, `/events/{id}`) lives under this scope.
 5. Save.
 
 ### About app verification
@@ -63,10 +65,27 @@ verified this app" warning, submit the app for verification:
 - Add a **privacy policy** URL and a **terms of service** URL.
 - Complete the **Data Access** and **scopes** sections, then submit.
 
-Scoping note: we only ever create and update the user's **own** task
-events, so `calendar.events` is the narrower scope and the right one to
-request first. `calendar` is included because the incremental sync reads
-event metadata and the `events.watch` endpoint needs it.
+### Scope note (changed in Phase 3)
+
+Earlier revisions of this file requested **two** scopes: `calendar.events`
+*and* the full `calendar`, on the claim that `events.watch` needed the
+broader one. **That justification was not verified** and the broader scope has
+now been removed — it is classified sensitive, which inflates the Production
+verification burden and grants calendar-wide access the app never uses.
+
+### ⚠️ Unverified: two-way sync (`events.watch`)
+
+The code calls `/calendars/{id}/events/watch` for push notifications. Whether
+Google accepts `calendar.events` alone for watching a calendar's **event
+collection** is not confirmed. If "Watch for changes" fails with
+`403 insufficientPermissions`, re-add `calendar`.
+
+**One-way sync (the default and what most users rely on) is definitely
+unaffected** — `events.insert`, `events.update` and `events.delete` all
+require only `calendar.events`.
+
+Verify with: Settings → Google Calendar → **Watch for changes** → check for a
+403. See `docs/calendar-qa.md` §6.
 
 ---
 

@@ -20,10 +20,7 @@ import {
 const ARGS = {
   clientId: "client-abc.apps.googleusercontent.com",
   redirectUri: "https://task.creativoxa.com/api/auth/google/callback",
-  scopes: [
-    "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/calendar",
-  ],
+  scopes: ["https://www.googleapis.com/auth/calendar.events"],
   state: "state-value",
 };
 

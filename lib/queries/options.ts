@@ -144,7 +144,7 @@ export const employeeDetailOptions = (id: string) =>
   });
 
 export const activeEmployeesOptions = queryOptions<
-  Array<{ id: string; full_name: string; avatar_url: string | null }>
+  Array<{ id: string; full_name: string; email: string; avatar_url: string | null }>
 >({
   queryKey: qk.activeEmployees(),
   queryFn: async () => {

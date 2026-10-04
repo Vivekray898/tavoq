@@ -24,10 +24,13 @@ import { formatCurrency } from "@/lib/utils";
 import {
   foldAdjustments,
   one,
+  resolveLedgerStatus,
   type PaymentItem,
   type PaymentLedgerRow,
   type PaymentKind,
+  type LedgerStatus,
 } from "@/lib/payments/adjustments";
+import { toPaise, toRupees } from "@/lib/payments/money";
 
 export interface EmployeeSummary {
   id: string;
@@ -46,6 +49,22 @@ export interface PaymentWorkspaceData {
     paidThisWeek: number;
     paidThisMonth: number;
     paidTotal: number;
+    /**
+     * Counts that must stay paired with their window.
+     *
+     * The metrics strip previously rendered "Paid this week" with the
+     * all-time paid count, so a week with one payout read as though it
+     * contained every payment ever made. Each count below is scoped to
+     * the window named beside it and is never substituted for another.
+     */
+    paidThisWeekCount: number;
+    paidThisMonthCount: number;
+    /** Same calendar window, previous period — drives the delta sub-line. */
+    paidLastWeek: number;
+    paidLastWeekCount: number;
+    paidLastMonth: number;
+    paidCancelledTotal: number;
+    paidCancelledCount: number;
   };
   employees: EmployeeSummary[];
   history: PaymentItem[];
@@ -88,9 +107,11 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
       supabase
         .from("payments")
         .select(
-          `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+          `id, task_id, employee_id, description, amount, amount_paise, status, type,
+           payment_method, reference_number, due_date,
+           paid_at, payment_note, created_at,
            kind, parent_payment_id,
-           employee:profiles!payments_employee_id_fkey(full_name),
+           employee:profiles!payments_employee_id_fkey(full_name, email),
            paid_by_profile:profiles!payments_paid_by_fkey(full_name),
            task:tasks(id, title, project:projects(name, client:clients(name)))`
         )
@@ -114,23 +135,80 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
       (paymentsRes.data ?? []) as unknown as PaymentLedgerRow[]
     );
 
+    // The workspace totals come from ONE server-side RPC rather than a
+    // loop over up to 500 rows. Beyond the extra rows it costs, the old
+    // loop had a real defect: it derived every window from a single
+    // all-time `paidCount`, so "Paid this week" reported the lifetime
+    // count. get_payments_summary returns per-window counts.
+    const { data: summaryRow, error: summaryError } = await supabase.rpc(
+      "get_payments_summary"
+    );
+
     let pendingTotal = 0;
     let pendingCount = 0;
     let paidThisWeek = 0;
     let paidThisMonth = 0;
     let paidTotal = 0;
+    let paidThisWeekCount = 0;
+    let paidThisMonthCount = 0;
+    let paidLastWeek = 0;
+    let paidLastWeekCount = 0;
+    let paidLastMonth = 0;
+    let paidCancelledTotal = 0;
+    let paidCancelledCount = 0;
 
-    for (const item of items) {
-      if (item.status === "PENDING") {
-        pendingTotal += item.amount;
-        pendingCount += 1;
-        continue;
+    if (summaryError) {
+      // Degrade to the JS rollup rather than failing the whole page: the
+      // rows are already loaded, and a summary card is not worth an error
+      // boundary. Logged so a broken RPC is visible in production.
+      console.error("[getPaymentWorkspace] summary rpc", summaryError);
+      for (const item of items) {
+        if (item.status === "PENDING") {
+          pendingTotal += item.amount;
+          pendingCount += 1;
+          continue;
+        }
+        if (item.status !== "PAID") continue;
+        paidTotal += item.amount;
+        if (item.paid_at) {
+          if (item.paid_at >= weekStart.toISOString()) paidThisWeek += item.amount;
+          if (item.paid_at >= monthStartIso) paidThisMonth += item.amount;
+        }
       }
-      paidTotal += item.amount;
-      if (item.paid_at) {
-        if (item.paid_at >= weekStart.toISOString()) paidThisWeek += item.amount;
-        if (item.paid_at >= monthStartIso) paidThisMonth += item.amount;
-      }
+    } else if (summaryRow && summaryRow.length > 0) {
+      const summary = summaryRow[0] as {
+        pending_total: number;
+        pending_count: number;
+        paid_total: number;
+        paid_this_week: number;
+        paid_this_month: number;
+        paid_this_week_count: number;
+        paid_this_month_count: number;
+        paid_last_week: number;
+        paid_last_month: number;
+        cancelled_total: number;
+        cancelled_count: number;
+      };
+      pendingTotal = toRupees(summary.pending_total);
+      pendingCount = Number(summary.pending_count);
+      paidTotal = toRupees(summary.paid_total);
+      paidThisWeek = toRupees(summary.paid_this_week);
+      paidThisMonth = toRupees(summary.paid_this_month);
+      paidThisWeekCount = Number(summary.paid_this_week_count);
+      paidThisMonthCount = Number(summary.paid_this_month_count);
+      paidLastWeek = toRupees(summary.paid_last_week);
+      paidLastMonth = toRupees(summary.paid_last_month);
+      paidCancelledTotal = toRupees(summary.cancelled_total);
+      paidCancelledCount = Number(summary.cancelled_count);
+      // The RPC returns one last-week AMOUNT, not its count, so derive
+      // the count from the loaded rows over the same window. Amounts
+      // stay RPC-sourced; this is only a count.
+      const lastWeekStartMs = weekStart.getTime() - 7 * 86_400_000;
+      paidLastWeekCount = items.filter((p) => {
+        if (p.status !== "PAID" || !p.paid_at) return false;
+        const t = new Date(p.paid_at).getTime();
+        return Number.isFinite(t) && t >= lastWeekStartMs && t < weekStart.getTime();
+      }).length;
     }
 
     // Per-employee rollup — every employee appears, even with no rows.
@@ -154,7 +232,9 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
       if (item.status === "PENDING") {
         entry.pending += item.amount;
         entry.pendingCount += 1;
-      } else {
+      } else if (item.status === "PAID") {
+        // CANCELLED is neither pending nor paid — counting it as paid
+        // would put money in a payroll total that never left the bank.
         entry.paidTotal += item.amount;
         if (item.paid_at) {
           if (item.paid_at >= weekStart.toISOString()) entry.paidThisWeek += item.amount;
@@ -166,7 +246,20 @@ export async function getPaymentWorkspace(): Promise<ActionResponse<PaymentWorks
     return {
       success: true,
       data: {
-        summary: { pendingTotal, pendingCount, paidThisWeek, paidThisMonth, paidTotal },
+        summary: {
+          pendingTotal,
+          pendingCount,
+          paidThisWeek,
+          paidThisMonth,
+          paidTotal,
+          paidThisWeekCount,
+          paidThisMonthCount,
+          paidLastWeek,
+          paidLastWeekCount,
+          paidLastMonth,
+          paidCancelledTotal,
+          paidCancelledCount,
+        },
         employees: Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name)),
         history: items,
       },
@@ -353,10 +446,21 @@ export async function createPaymentFromTasks(
 
       const paymentRow = {
         employee_id: employeeId,
+        // amount_paise is authoritative. `amount` (NUMERIC) is still
+        // written because the column is NOT NULL and several read paths
+        // (dashboard, employees, getMyEarnings) still sum it. Both are
+        // derived from the same rupee value in one place, so they cannot
+        // disagree. Dropping `amount` is a follow-up migration.
+        amount_paise: toPaise(amount),
+        amount,
+        status: "PAID",
+        type: "TASK_PAYOUT",
+        payment_method: "OTHER",
+        payee: employeeId,
+        created_by: profile.id,
         paid_at: paidAt,
         paid_by: profile.id,
         payment_note: paymentNote || null,
-        amount,
       };
 
       const res = existingId
@@ -446,8 +550,18 @@ export async function createCustomPayment(
       .from("payments")
       .insert({
         employee_id: employeeId,
+        payee: employeeId,
+        created_by: profile.id,
         description: description.trim(),
+        amount_paise: toPaise(amount),
         amount,
+        type: "CUSTOM",
+        status: markPaidNow ? "PAID" : "PENDING",
+        // PAID rows must carry the full paid_* triple or the
+        // payments_paid_complete constraint rejects them. Legacy rows are
+        // backfilled with OTHER; the real method arrives with the
+        // mark-paid dialog in step C.
+        payment_method: markPaidNow ? "OTHER" : null,
         paid_at: markPaidNow ? new Date().toISOString() : null,
         paid_by: markPaidNow ? profile.id : null,
         payment_note: paymentNote || null,
@@ -488,6 +602,7 @@ export async function createCustomPayment(
         kind: "CUSTOM",
         employee_id: employeeId,
         employee_name: employee.full_name,
+        employee_email: employee.email,
         task_id: null,
         label: description.trim(),
         project_name: null,
@@ -499,6 +614,12 @@ export async function createCustomPayment(
         status: markPaidNow ? "PAID" : "PENDING",
         paid_at: markPaidNow ? new Date().toISOString() : null,
         payment_note: paymentNote || null,
+        amount_paise: toPaise(amount),
+        base_amount_paise: toPaise(amount),
+        type: "CUSTOM",
+        method: markPaidNow ? "OTHER" : null,
+        reference_number: null,
+        due_date: null,
       },
     };
   } catch {
@@ -518,9 +639,10 @@ export async function markPaymentPaid(
     const { data: row, error } = await supabase
       .from("payments")
       .select(
-        `id, task_id, employee_id, description, amount, paid_at, payment_note,
+        `id, task_id, employee_id, description, amount, amount_paise, status, type,
+         payment_method, reference_number, due_date, paid_at, payment_note,
          employee:profiles!payments_employee_id_fkey(full_name, email),
-         task:tasks(id, title, assigned_to)`
+         task:tasks(id, title, status, assigned_to)`
       )
       .eq("id", paymentId)
       .single();
@@ -536,17 +658,47 @@ export async function markPaymentPaid(
       employee_id: string | null;
       description: string | null;
       amount: number | string;
+      amount_paise: number | string;
+      status: LedgerStatus;
+      payment_method: string | null;
+      reference_number: string | null;
+      due_date: string | null;
       paid_at: string | null;
       payment_note: string | null;
       created_at?: string;
       employee: { full_name: string; email: string }[] | { full_name: string; email: string } | null;
-      task: { id: string; title: string; assigned_to: string | null } | null;
+      task: { id: string; title: string; status: string; assigned_to: string | null } | null;
     };
 
     const paidAt = new Date().toISOString();
+
+    // Reject a payment the task rules forbid BEFORE writing, so the user
+    // gets the real reason. mark_payments_paid re-checks the same rule
+    // under a row lock — this is a fast path, not the guarantee.
+    if (paidRow.status === "PAID") {
+      return { success: false, error: "This payment is already marked paid" };
+    }
+    if (paidRow.status === "CANCELLED") {
+      return { success: false, error: "This payment was cancelled" };
+    }
+    if (paidRow.task_id && paidRow.task && paidRow.task.status !== "APPROVED") {
+      return {
+        success: false,
+        error: "A task payout can only be paid once the task is approved",
+      };
+    }
+
     const { error: updateError } = await supabase
       .from("payments")
-      .update({ paid_at: paidAt, paid_by: profile.id, payment_note: paymentNote || paidRow.payment_note })
+      .update({
+        status: "PAID",
+        paid_at: paidAt,
+        paid_by: profile.id,
+        // The full paid_* triple is required for PAID. The real method
+        // picker arrives in step C; OTHER keeps the row valid until then.
+        payment_method: paidRow.payment_method ?? "OTHER",
+        payment_note: paymentNote || paidRow.payment_note,
+      })
       .eq("id", paymentId);
 
     if (updateError) {
@@ -586,6 +738,7 @@ export async function markPaymentPaid(
         kind: paidRow.task_id ? "TASK" : "CUSTOM",
         employee_id: paidRow.employee_id,
         employee_name: employee?.full_name ?? null,
+        employee_email: employee?.email ?? null,
         task_id: paidRow.task_id,
         label: paidRow.task_id ? (paidRow.task?.title ?? "Task") : (paidRow.description ?? "Custom payment"),
         project_name: null,
@@ -598,6 +751,12 @@ export async function markPaymentPaid(
         paid_at: paidAt,
         payment_note: paymentNote || paidRow.payment_note,
         created_at: paidRow.created_at,
+        amount_paise: Number(paidRow.amount_paise),
+        base_amount_paise: Number(paidRow.amount_paise),
+        type: "TASK_PAYOUT",
+        method: "OTHER",
+        reference_number: null,
+        due_date: paidRow.due_date,
       },
     };
   } catch {
@@ -631,7 +790,7 @@ export interface EarningsData {
       amount: number;
       /** Net of adjustments; 0 when none. Drives the hint under the row. */
       adjustment_total: number;
-      status: "PENDING" | "PAID";
+      status: LedgerStatus;
       paid_at: string | null;
       payment_note: string | null;
     }>;
@@ -652,7 +811,8 @@ export async function getMyEarnings(
     const { data, error } = await supabase
       .from("payments")
       .select(
-        `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+        `id, task_id, employee_id, description, amount, amount_paise, status, type,
+         payment_method, reference_number, due_date, paid_at, payment_note, created_at,
          kind, parent_payment_id,
          task:tasks(id, title, project:projects(name))`
       )
@@ -709,14 +869,18 @@ export async function getMyEarnings(
       const label = row.task_id ? (task?.title ?? "Task") : (row.description ?? "Custom payment");
       const adjustment_total = isAdjustment ? 0 : (adjustmentsByParent.get(row.id) ?? 0);
       const amount = Number(row.amount) + adjustment_total;
-      const status: "PENDING" | "PAID" = row.paid_at ? "PAID" : "PENDING";
+      // Prefer the stored ledger status; the paid_at fallback keeps rows
+      // that predate migration 025 reading correctly.
+      const status = resolveLedgerStatus(row);
 
       if (status === "PAID") {
         totalPaid += amount;
         if (row.paid_at && row.paid_at >= weekStartIso && row.paid_at < weekEndIso) {
           thisWeek += amount;
         }
-      } else {
+      } else if (status === "PENDING") {
+        // CANCELLED is neither owed nor paid, so it belongs in neither
+        // total — counting it would misstate an employee's balance.
         pending += amount;
         pendingCount += 1;
       }
@@ -1005,7 +1169,8 @@ export async function createPaymentAdjustment(
     const { data: parent, error: parentError } = await supabase
       .from("payments")
       .select(
-        `id, task_id, employee_id, description, amount, paid_at, payment_note, created_at,
+        `id, task_id, employee_id, description, amount, amount_paise, status, type,
+         payment_method, reference_number, due_date, paid_at, payment_note, created_at,
          kind, parent_payment_id,
          employee:profiles!payments_employee_id_fkey(full_name, email),
          task:tasks(id, title)`
@@ -1052,7 +1217,15 @@ export async function createPaymentAdjustment(
       .insert({
         task_id: parent.task_id,
         employee_id: parent.employee_id,
+        payee: parent.employee_id,
+        created_by: profile.id,
+        // Signed paise: positive bonus, negative deduction. This is why
+        // the DB constraint is scoped to kind = 'PAYMENT'.
+        amount_paise: toPaise(amount),
         amount,
+        type: "ADJUSTMENT",
+        status: "PAID",
+        payment_method: "OTHER",
         paid_at: new Date().toISOString(),
         paid_by: profile.id,
         payment_note: reason,
@@ -1103,6 +1276,7 @@ export async function createPaymentAdjustment(
         kind: parentRow.task_id ? "TASK" : "CUSTOM",
         employee_id: parentRow.employee_id,
         employee_name: employee?.full_name ?? null,
+        employee_email: employee?.email ?? null,
         task_id: parentRow.task_id,
         label: parentRow.task_id
           ? (parentRow.task?.title ?? "Task")
@@ -1117,6 +1291,14 @@ export async function createPaymentAdjustment(
         paid_at: new Date().toISOString(),
         payment_note: reason,
         created_at: (created as { created_at: string }).created_at,
+        // Signed: the client's applyAdjustmentToItem adds this to the
+        // parent's paise, so a negative deduction reduces the net.
+        amount_paise: toPaise(amount),
+        base_amount_paise: toPaise(amount),
+        type: "ADJUSTMENT",
+        method: "OTHER",
+        reference_number: null,
+        due_date: null,
       },
     };
   } catch {

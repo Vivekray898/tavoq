@@ -1,6 +1,7 @@
 import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendPushToUser } from "@/lib/push";
+import { buildDedupeKey } from "@/lib/push-preferences";
 import {
   sendTaskAssignedEmail,
   sendRevisionRequestedEmail,
@@ -56,6 +57,12 @@ export async function createNotification(input: CreateNotificationInput) {
 
   // §20 — deliver as a real browser/system notification too
   // (fire-and-forget; requires VAPID keys to be configured).
+  //
+  // Phase 2: `type` lets the sender honour the user's per-channel
+  // preference, and `dedupeKey` stops a retried action notifying twice.
+  // The key is reference + hour: a duplicate firing inside the same hour
+  // collapses, while a genuine later event on the same task still gets
+  // through. See buildDedupeKey for why the row id is not used.
   void sendPushToUser(input.userId, {
     title: input.title,
     body: input.message,
@@ -66,6 +73,8 @@ export async function createNotification(input: CreateNotificationInput) {
           ? `/projects/${input.referenceId}`
           : "/notifications",
     tag: input.type,
+    type: input.type,
+    dedupeKey: buildDedupeKey(input.userId, input.type, input.referenceId),
   });
 
   return { success: true as const };

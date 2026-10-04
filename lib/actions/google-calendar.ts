@@ -24,13 +24,16 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createNotification } from "@/lib/notifications";
 import { requireAuth } from "@/lib/auth";
 import { decryptToken, encryptToken } from "@/lib/crypto/google-token";
 import {
+  backoffDelayMs,
   buildAuthorizeParams,
   buildEventBody,
   callbackRedirectUri,
   normalizeAppUrl,
+  shouldRetryStatus,
   type SyncableTask,
 } from "@/lib/google/calendar";
 import type { ActionResponse } from "@/types/database";
@@ -47,8 +50,15 @@ const USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo";
 
 /** Minimal write scope — enough to create/update our own events. */
 const SCOPES = [
+  // Narrowest scope that covers every call this integration makes. Each
+  // endpoint used is /events or /events/watch, which live entirely under
+  // calendar.events — the full "calendar" scope was never needed.
+  //
+  // Both calendar scopes are classified SENSITIVE by Google, so dropping the
+  // broader one directly reduces what Production verification asks you to
+  // justify, and stops the app holding calendar-wide read/write on every
+  // connected account. Users must re-consent once after this change.
   "https://www.googleapis.com/auth/calendar.events",
-  "https://www.googleapis.com/auth/calendar",
 ];
 
 const OAUTH_STATE_COOKIE = "gcal_oauth_state";
@@ -180,16 +190,14 @@ async function getAccessToken(row: GoogleTokenRow): Promise<TokenBundle> {
 
 
   if (!json.access_token) {
-    // A dead grant must not be retried forever: drop the row so the user
-    // is told to reconnect and the next sync is a clean "not connected".
+    // A dead grant must not be retried forever, but it must not be erased
+    // either. Flag the connection as needing a reconnect so the user sees
+    // WHY their calendar stopped updating instead of a bare "not connected".
     if (json.error && PERMANENT_TOKEN_ERRORS.has(json.error)) {
-      await createAdminClient()
-        .from("user_google_tokens")
-        .delete()
-        .eq("id", row.id);
+      await markNeedsReconnect(row.user_id, json.error);
       console.error(
-        "[google] refresh token permanently invalid, row cleared",
-        row.id,
+        "[google] refresh token permanently invalid, reconnect required",
+        row.user_id,
         json.error
       );
       throw new GoogleAuthRevokedError();
@@ -232,34 +240,135 @@ interface GoogleApiError {
   error?: { code?: number; message?: string };
 }
 
+/** Transient Google/API failures worth retrying. */
+const MAX_API_ATTEMPTS = 4;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch a Google Calendar API endpoint, retrying transient failures.
+ *
+ * Phase 3 added the retry. It is deliberately narrow:
+ *
+ *   • Only 429 and 5xx, plus transport errors, are retried. A 4xx such as
+ *     invalid_grant or 404 fails identically on every attempt, and retrying
+ *     it turns a real error into a long hang.
+ *   • Bounded at MAX_API_ATTEMPTS with exponential backoff, so a task list
+ *     sync cannot block a server action indefinitely.
+ *   • 410 is checked BEFORE the retry decision, because it means the sync
+ *     token is gone and must trigger a full resync rather than another
+ *     identical call.
+ */
 async function googleFetch<T>(url: string, accessToken: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-    cache: "no-store",
-  });
+  let lastError: unknown;
 
-  if (res.status === 410) {
-    throw new SyncTokenGoneError();
+  for (let attempt = 0; attempt < MAX_API_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          ...(init?.headers ?? {}),
+        },
+        cache: "no-store",
+      });
+
+      if (res.status === 410) {
+        throw new SyncTokenGoneError();
+      }
+
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as GoogleApiError;
+        const error = new Error(
+          `Google API ${res.status}: ${body.error?.message ?? res.statusText}`
+        );
+        // Carry the status so the retry decision below can see it.
+        (error as { status?: number }).status = res.status;
+        throw error;
+      }
+
+      return (await res.json()) as T;
+    } catch (err) {
+      // A gone sync token is a permanent, meaningful signal — never retry it.
+      if (err instanceof SyncTokenGoneError) throw err;
+      lastError = err;
+
+      const status = (err as { status?: number }).status;
+      const retryable =
+        status === undefined ? true : shouldRetryStatus(status);
+
+      if (!retryable || attempt === MAX_API_ATTEMPTS - 1) throw err;
+
+      await sleep(backoffDelayMs(attempt));
+    }
   }
 
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as GoogleApiError;
-    throw new Error(
-      `Google API ${res.status}: ${body.error?.message ?? res.statusText}`
-    );
-  }
-
-  return (await res.json()) as T;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Google Calendar request failed");
 }
 
 // ──────────────────────────────────────────────
 // DB access (service role — RLS doesn't apply)
 // ──────────────────────────────────────────────
+
+
+/**
+ * Record that the grant is permanently dead.
+ *
+ * Phase 3 changed this deliberately: the previous behaviour DELETED the
+ * token row, which destroyed the evidence that the user had ever connected.
+ * The UI could then only say "not connected", sending them through consent
+ * again for a problem they did not cause. Migration 024 adds
+ * google_connections with an explicit status, so the row survives and the
+ * settings UI can say "your access expired — reconnect".
+ *
+ * Best-effort: if the status write itself fails we still throw, because the
+ * original invalid_grant is the error that matters.
+ */
+async function markNeedsReconnect(userId: string, reason: string): Promise<void> {
+  try {
+    await createAdminClient()
+      .from("google_connections")
+      .update({
+        status: "NEEDS_RECONNECT",
+        last_error: reason,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("user_id", userId);
+
+    // Phase 3 spec: mark needs_reconnect AND notify the user. Marking alone
+    // leaves the problem silent until they happen to open settings — with
+    // the consent screen in Testing, this fires for EVERY user roughly
+    // weekly, so it cannot be something they discover on their own.
+    await createNotification({
+      userId,
+      type: "GOOGLE_RECONNECT_REQUIRED",
+      title: "Google Calendar needs reconnecting",
+      message:
+        "Your Google Calendar access expired, so your tasks are no longer syncing. Reconnect to resume.",
+    });
+  } catch (err) {
+    console.error("[google] could not record needs_reconnect", err);
+  }
+}
+
+
+/** Row from migration 024. Null before the migration is applied. */
+async function loadConnectionRow(userId: string): Promise<GoogleConnectionRow | null> {
+  const { data, error } = await createAdminClient()
+    .from("google_connections")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  // A missing table (migration not applied) must not break the settings page.
+  if (error) return null;
+  return (data as GoogleConnectionRow | null) ?? null;
+}
 
 async function loadTokenRow(userId: string): Promise<GoogleTokenRow | null> {
   const { data, error } = await createAdminClient()
@@ -275,8 +384,72 @@ async function loadTokenRow(userId: string): Promise<GoogleTokenRow | null> {
   return (data as GoogleTokenRow | null) ?? null;
 }
 
+export type GoogleConnectionState =
+  | "disconnected"
+  | "active"
+  | "needs_reconnect"
+  | "error";
+
+interface GoogleConnectionRow {
+  user_id: string;
+  status: "ACTIVE" | "NEEDS_RECONNECT" | "ERROR";
+  last_error: string | null;
+  connected_at: string | null;
+  google_email: string | null;
+}
+
+
+/**
+ * Record the task <-> event mapping in calendar_events (migration 024).
+ *
+ * tasks.google_event_id is still written, because existing code and the
+ * legacy sync paths read it. This is the authoritative table: it can hold
+ * sync timestamps and errors, which a column cannot.
+ *
+ * Unique on (user_id, task_id) and (user_id, google_event_id), so this is an
+ * upsert — re-syncing updates in place instead of duplicating the mapping.
+ * That uniqueness is what makes one-way sync idempotent at the data layer.
+ */
+async function recordCalendarEventMapping(
+  userId: string,
+  taskId: string,
+  googleEventId: string
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin.from("calendar_events").upsert(
+    {
+      user_id: userId,
+      task_id: taskId,
+      google_event_id: googleEventId,
+      last_error: null,
+      last_synced_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,task_id" }
+  );
+  if (error) console.error("[google] calendar_events upsert failed", error);
+}
+
+/** Drop the mapping by Google event id, for the delete path. */
+async function clearCalendarEventMappingByEvent(
+  userId: string,
+  googleEventId: string
+): Promise<void> {
+  const { error } = await createAdminClient()
+    .from("calendar_events")
+    .delete()
+    .eq("user_id", userId)
+    .eq("google_event_id", googleEventId);
+  if (error) console.error("[google] calendar_events delete failed", error);
+}
+
+
 export interface GoogleConnectionStatus {
   connected: boolean;
+  /** Phase 3: distinct from !connected, so the UI can explain a revoked grant. */
+  state: GoogleConnectionState;
+  lastError?: string | null;
+  connectedAt?: string | null;
   googleEmail: string | null;
   calendarId: string | null;
   lastSyncedAt: string | null;
@@ -289,14 +462,24 @@ export async function getGoogleCalendarStatus(): Promise<
 > {
   try {
     const profile = await requireAuth();
+
+    // google_connections is the source of truth for WHY the connection is in
+    // its current state; user_google_tokens still holds the token material.
+    const connection = await loadConnectionRow(profile.id);
     const row = await loadTokenRow(profile.id);
 
     if (!row) {
+      // A connection record with no token means we already know the grant is
+      // dead — that is "needs_reconnect", not a first-time "disconnected".
+      const needsReconnect = connection?.status === "NEEDS_RECONNECT";
       return {
         success: true,
         data: {
           connected: false,
-          googleEmail: null,
+          state: needsReconnect ? "needs_reconnect" : "disconnected",
+          lastError: connection?.last_error ?? null,
+          connectedAt: connection?.connected_at ?? null,
+          googleEmail: connection?.google_email ?? null,
           calendarId: null,
           lastSyncedAt: null,
           syncedTaskCount: 0,
@@ -305,18 +488,22 @@ export async function getGoogleCalendarStatus(): Promise<
     }
 
     const { count } = await createAdminClient()
-      .from("tasks")
+      .from("calendar_events")
       .select("id", { count: "exact", head: true })
-      .eq("assigned_to", profile.id)
-      .not("google_event_id", "is", null);
+      .eq("user_id", profile.id);
 
     return {
       success: true,
       data: {
         connected: true,
+        state: connection?.status === "NEEDS_RECONNECT" ? "needs_reconnect" : "active",
+        lastError: connection?.last_error ?? null,
+        connectedAt: connection?.connected_at ?? null,
         googleEmail: row.google_email,
         calendarId: row.calendar_id,
         lastSyncedAt: row.last_synced_at,
+        // Fall back to the legacy column if migration 024 has not been applied
+        // yet, so the count never silently reads as zero.
         syncedTaskCount: count ?? 0,
       },
     };
@@ -457,6 +644,25 @@ export async function handleGoogleCallback(
       return { success: false, error: "Couldn't save the Google connection" };
     }
 
+    // Mark the connection ACTIVE. Without this a user who reconnects after
+    // a revoked grant stays pinned at NEEDS_RECONNECT forever: the flag is
+    // only ever set on failure, so nothing would ever clear it and the UI
+    // would keep insisting their access had expired despite a working
+    // consent. Clearing last_error here is the point of reconnecting.
+    await admin.from("google_connections").upsert(
+      {
+        user_id: userId,
+        encrypted_refresh_token: encryptToken(json.refresh_token),
+        google_email: googleEmail,
+        calendar_id: "primary",
+        status: "ACTIVE",
+        last_error: null,
+        connected_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" }
+    );
+
     return { success: true, data: { googleEmail } };
   } catch (err) {
     console.error("[google] handleGoogleCallback", err);
@@ -490,6 +696,12 @@ export async function disconnectGoogleCalendar(): Promise<ActionResponse> {
 
       await createAdminClient()
         .from("user_google_tokens")
+        .delete()
+        .eq("user_id", profile.id);
+      // Drop the connection state as well; leaving a NEEDS_RECONNECT row
+      // behind would make a fresh connect look like a failed one.
+      await createAdminClient()
+        .from("google_connections")
         .delete()
         .eq("user_id", profile.id);
     }
@@ -554,6 +766,7 @@ export async function syncTaskToCalendar(
         accessToken,
         { method: "PUT", body: JSON.stringify(event) }
       );
+      await recordCalendarEventMapping(profile.id, taskId, task.google_event_id);
       return { success: true, data: { googleEventId: task.google_event_id } };
     }
 
@@ -563,6 +776,7 @@ export async function syncTaskToCalendar(
     });
 
     await admin.from("tasks").update({ google_event_id: created.id }).eq("id", taskId);
+    await recordCalendarEventMapping(profile.id, taskId, created.id);
     return { success: true, data: { googleEventId: created.id } };
   } catch (err) {
     console.error("[google] syncTaskToCalendar", err);
@@ -1159,6 +1373,9 @@ export async function removeCalendarEvent(
     if (!row) return;
     const { accessToken } = await getAccessToken(row);
     await deleteEvent(row, googleEventId, accessToken);
+    // Drop the mapping too, otherwise the row claims an event that no longer
+    // exists and the next sync would try to update a deleted event.
+    await clearCalendarEventMappingByEvent(userId, googleEventId);
   } catch (err) {
     console.error(
       "[google] removeCalendarEvent failed",

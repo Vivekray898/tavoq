@@ -1,13 +1,15 @@
 {
+  "id": "/",
   "name": "Taskora",
   "short_name": "Taskora",
   "description": "Simple team work management for your agency.",
+  "lang": "en",
+  "dir": "ltr",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#171717",
-  "orientation": "portrait-primary",
   "categories": ["business", "productivity"],
   "icons": [
     {

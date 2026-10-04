@@ -65,7 +65,11 @@ describe("buildEventBody — tasks with no deadline", () => {
     const start = body.start as { dateTime: string; timeZone: string };
     const end = body.end as { dateTime: string; timeZone: string };
     assert.ok(start.dateTime, "expected a timed event");
-    assert.equal(start.timeZone, "UTC");
+    // CHANGED IN PHASE 3. This asserted "UTC", which is what made the
+    // all-day date land a day early for deadlines before 05:30 IST. The
+    // calendar now defaults to Asia/Kolkata, per the phase spec.
+    assert.equal(start.timeZone, "Asia/Kolkata");
+    assert.equal(end.timeZone, "Asia/Kolkata");
     const hours =
       (new Date(end.dateTime).getTime() - new Date(start.dateTime).getTime()) / 3_600_000;
     assert.equal(hours, 1);

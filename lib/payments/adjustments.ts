@@ -8,14 +8,61 @@
 // reversing one means recording the opposite amount. That is what keeps
 // the money trail auditable.
 
+import { toPaise, toRupees } from "./money.ts";
+
 /** App-level payment shape: task-linked, or standalone/custom. */
 export type PaymentKind = "TASK" | "CUSTOM";
+
+/**
+ * Stored ledger status (migration 025).
+ *
+ * Deliberately NOT the `payment_status` enum, which belongs to `tasks`
+ * (NOT_APPLICABLE | PENDING | PAID). A ledger payment can be cancelled;
+ * a task cannot. Cancelling a payment never rewrites task state.
+ *
+ * The old code inferred this as `paid_at ? "PAID" : "PENDING"`, which
+ * made CANCELLED inexpressible. Read `status` first and fall back to
+ * that inference only for rows written before the column existed.
+ */
+export type LedgerStatus = "PENDING" | "PAID" | "CANCELLED";
+
+/** How the money left the business. Recorded only when PAID. */
+export type PaymentMethod = "UPI" | "BANK_TRANSFER" | "CASH" | "OTHER";
+
+/**
+ * UI-facing classification, distinct from the `kind` DB marker.
+ *
+ * BONUS exists for new rows. Legacy bonuses were recorded as an
+ * ADJUSTMENT with a positive amount (that is what the code did), so
+ * backfill maps them to ADJUSTMENT rather than inventing history — the
+ * direction of an adjustment is its sign, not its type.
+ */
+export type LedgerPaymentType = "TASK_PAYOUT" | "CUSTOM" | "BONUS" | "ADJUSTMENT";
+
+/**
+ * Resolve the ledger status for a row.
+ *
+ * Prefers the stored column and falls back to the historical
+ * `paid_at IS NULL` inference so a row that predates migration 025 (or
+ * arrives from a cache that has not revalidated) still reads correctly.
+ * A CANCELLED row never infers to PAID even if paid_at survived.
+ */
+export function resolveLedgerStatus(
+  row: { status?: LedgerStatus | null; paid_at?: string | null }
+): LedgerStatus {
+  if (row.status === "PENDING" || row.status === "PAID" || row.status === "CANCELLED") {
+    return row.status;
+  }
+  return row.paid_at ? "PAID" : "PENDING";
+}
 
 /** One bonus or deduction attached to a paid payment. */
 export interface AdjustmentSummary {
   id: string;
   /** Signed: positive bonus, negative deduction. */
   amount: number;
+  /** The same signed value in paise — authoritative. */
+  amount_paise: number;
   reason: string;
   created_at: string;
   actor_name: string | null;
@@ -27,6 +74,12 @@ export interface PaymentItem {
   kind: PaymentKind;
   employee_id: string | null;
   employee_name: string | null;
+  /**
+   * The employee's email, carried so the UI can fall back to it when no
+   * full name is set. Without this the shared display helper has nothing
+   * to fall back to and the row would show a placeholder.
+   */
+  employee_email: string | null;
   task_id: string | null;
   label: string; // task title or custom description
   project_name: string | null;
@@ -46,9 +99,17 @@ export interface PaymentItem {
   /** Net of all adjustments — 0 when there are none. */
   adjustment_total: number;
   adjustments: AdjustmentSummary[];
-  status: "PENDING" | "PAID";
+  status: LedgerStatus;
   paid_at: string | null;
   payment_note: string | null;
+  /** Authoritative amount in paise (net of adjustments). */
+  amount_paise: number;
+  /** The payout before adjustments, in paise. */
+  base_amount_paise: number;
+  type: LedgerPaymentType;
+  method: PaymentMethod | null;
+  reference_number: string | null;
+  due_date: string | null;
   /** Present on workspace/history items; batch-returns may omit it. */
   created_at?: string;
 }
@@ -71,13 +132,21 @@ export interface PaymentLedgerRow {
   employee_id: string | null;
   description: string | null;
   amount: number | string;
+  /** Authoritative amount. Falls back to `amount` × 100 when absent. */
+  amount_paise?: number | string | null;
   paid_at: string | null;
   payment_note: string | null;
   created_at: string;
   /** DB-level marker: a real payout, or a correction to one. */
   kind: "PAYMENT" | "ADJUSTMENT";
   parent_payment_id: string | null;
-  employee: { full_name: string }[] | { full_name: string } | null;
+  /** Ledger status (migration 025). Null on rows predating the column. */
+  status?: LedgerStatus | null;
+  type?: LedgerPaymentType | null;
+  payment_method?: PaymentMethod | null;
+  reference_number?: string | null;
+  due_date?: string | null;
+  employee: { full_name: string; email: string }[] | { full_name: string; email: string } | null;
   paid_by_profile: { full_name: string }[] | { full_name: string } | null;
   task: {
     id: string;
@@ -87,6 +156,24 @@ export interface PaymentLedgerRow {
       | { name: string; client: { name: string }[] | { name: string } | null }
       | null;
   } | null;
+}
+
+/**
+ * Read a row's amount as paise.
+ *
+ * Prefers `amount_paise`; falls back to `amount` × 100 so rows written
+ * before migration 025 (or read through a cache that has not
+ * revalidated) keep the same total instead of rendering as zero.
+ */
+export function rowAmountPaise(row: {
+  amount_paise?: number | string | null;
+  amount: number | string;
+}): number {
+  if (row.amount_paise !== null && row.amount_paise !== undefined) {
+    const direct = Number(row.amount_paise);
+    if (Number.isFinite(direct)) return Math.round(direct);
+  }
+  return toPaise(Number(row.amount));
 }
 
 /** Pull embedded relation rows whether Supabase returns array or object. */
@@ -147,9 +234,11 @@ export function foldAdjustments(rows: PaymentLedgerRow[]): PaymentItem[] {
       continue;
     }
     const list = byParent.get(parentId) ?? [];
+    const signedPaise = rowAmountPaise(row);
     list.push({
       id: row.id,
-      amount: Number(row.amount),
+      amount: toRupees(signedPaise),
+      amount_paise: signedPaise,
       reason: row.description ?? row.payment_note ?? "Adjustment",
       created_at: row.created_at,
       actor_name: one(row.paid_by_profile)?.full_name ?? null,
@@ -173,26 +262,39 @@ export function foldAdjustments(rows: PaymentLedgerRow[]): PaymentItem[] {
       : (byParent.get(row.id) ?? []).sort(
           (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)
         );
-    const adjustment_total = adjustments.reduce((sum, a) => sum + a.amount, 0);
-    const base_amount = Number(row.amount);
+    // Sum in paise, then convert once. Folding rupee floats is what
+    // makes a long ledger drift by a paisa.
+    const adjustment_total_paise = adjustments.reduce(
+      (sum, a) => sum + a.amount_paise,
+      0
+    );
+    const base_amount_paise = rowAmountPaise(row);
+    const net_paise = base_amount_paise + adjustment_total_paise;
 
     return {
       id: row.id,
       kind: row.task_id ? "TASK" : "CUSTOM",
       employee_id: row.employee_id,
       employee_name: employee?.full_name ?? null,
+      employee_email: employee?.email ?? null,
       task_id: row.task_id,
       label: row.task_id ? (task?.title ?? "Task") : (row.description ?? "Custom payment"),
       project_name: project?.name ?? null,
       client_name: client?.name ?? null,
-      amount: base_amount + adjustment_total,
-      base_amount,
-      adjustment_total,
+      amount: toRupees(net_paise),
+      base_amount: toRupees(base_amount_paise),
+      adjustment_total: toRupees(adjustment_total_paise),
       adjustments,
-      status: row.paid_at ? "PAID" : "PENDING",
+      status: resolveLedgerStatus(row),
       paid_at: row.paid_at,
       payment_note: row.payment_note,
       created_at: row.created_at,
+      amount_paise: net_paise,
+      base_amount_paise,
+      type: row.type ?? (row.kind === "ADJUSTMENT" ? "ADJUSTMENT" : row.task_id ? "TASK_PAYOUT" : "CUSTOM"),
+      method: row.payment_method ?? null,
+      reference_number: row.reference_number ?? null,
+      due_date: row.due_date ?? null,
     };
   };
 
@@ -211,10 +313,16 @@ export function applyAdjustmentToItem(
   item: PaymentItem,
   adjustment: AdjustmentSummary
 ): PaymentItem {
+  // Paise is the accumulator: `amount` is derived from it so the two
+  // can never disagree by a rounding step.
+  const amount_paise = item.amount_paise + adjustment.amount_paise;
+  const base_amount_paise = item.base_amount_paise;
   return {
     ...item,
-    amount: item.amount + adjustment.amount,
-    adjustment_total: item.adjustment_total + adjustment.amount,
+    amount: toRupees(amount_paise),
+    amount_paise,
+    base_amount_paise,
+    adjustment_total: toRupees(amount_paise - base_amount_paise),
     adjustments: [...item.adjustments, adjustment].sort(
       (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)
     ),
@@ -234,6 +342,13 @@ export function recomputeSummary(items: PaymentItem[]): {
   paidThisWeek: number;
   paidThisMonth: number;
   paidTotal: number;
+  paidThisWeekCount: number;
+  paidThisMonthCount: number;
+  paidLastWeek: number;
+  paidLastWeekCount: number;
+  paidLastMonth: number;
+  paidCancelledTotal: number;
+  paidCancelledCount: number;
 } {
   const now = new Date();
   const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
@@ -249,25 +364,72 @@ export function recomputeSummary(items: PaymentItem[]): {
   const monthStart = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) - 5.5 * 60 * 60 * 1000
   ).toISOString();
+  // Previous week and previous month, for the delta sub-lines. Weeks are
+  // 7 days and months vary, so the month offset is done on real dates
+  // rather than by subtracting a fixed span.
+  const weekStartMs = Date.parse(weekStart);
+  const monthStartMs = Date.parse(monthStart);
+  const lastWeekStartMs = weekStartMs - 7 * 86_400_000;
+  const lastMonthStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1) - 5.5 * 60 * 60 * 1000;
 
   let pendingTotal = 0;
   let pendingCount = 0;
   let paidThisWeek = 0;
   let paidThisMonth = 0;
   let paidTotal = 0;
+  let paidThisWeekCount = 0;
+  let paidThisMonthCount = 0;
+  let paidLastWeek = 0;
+  let paidLastWeekCount = 0;
+  let paidLastMonth = 0;
+  let paidCancelledTotal = 0;
+  let paidCancelledCount = 0;
 
   for (const item of items) {
+    // CANCELLED is neither pending nor paid, and must not inflate either
+    // total. This is the whole reason status is stored rather than
+    // inferred from paid_at.
+    if (item.status === "CANCELLED") {
+      paidCancelledTotal += item.amount;
+      paidCancelledCount += 1;
+      continue;
+    }
     if (item.status === "PENDING") {
       pendingTotal += item.amount;
       pendingCount += 1;
       continue;
     }
     paidTotal += item.amount;
-    if (item.paid_at) {
-      if (item.paid_at >= weekStart) paidThisWeek += item.amount;
-      if (item.paid_at >= monthStart) paidThisMonth += item.amount;
+    if (!item.paid_at) continue;
+    const t = Date.parse(item.paid_at);
+    if (!Number.isFinite(t)) continue;
+    if (item.paid_at >= weekStart) {
+      paidThisWeek += item.amount;
+      paidThisWeekCount += 1;
+    } else if (t >= lastWeekStartMs && t < weekStartMs) {
+      paidLastWeek += item.amount;
+      paidLastWeekCount += 1;
+    }
+    if (item.paid_at >= monthStart) {
+      paidThisMonth += item.amount;
+      paidThisMonthCount += 1;
+    } else if (t >= lastMonthStartMs && t < monthStartMs) {
+      paidLastMonth += item.amount;
     }
   }
 
-  return { pendingTotal, pendingCount, paidThisWeek, paidThisMonth, paidTotal };
+  return {
+    pendingTotal,
+    pendingCount,
+    paidThisWeek,
+    paidThisMonth,
+    paidTotal,
+    paidThisWeekCount,
+    paidThisMonthCount,
+    paidLastWeek,
+    paidLastWeekCount,
+    paidLastMonth,
+    paidCancelledTotal,
+    paidCancelledCount,
+  };
 }

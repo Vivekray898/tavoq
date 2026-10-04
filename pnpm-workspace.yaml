@@ -1,5 +1,16 @@
 allowBuilds:
+  # Both need their postinstall to place the platform-native binary. esbuild
+  # is bundled and invoked by @serwist/turbopack at build time to compile the
+  # service worker, and @swc/core backs Turbopack, so denying these fails the
+  # production build. sharp and unrs-resolver stay denied as before.
+  '@swc/core': true
+  esbuild: true
   sharp: false
   unrs-resolver: false
 minimumReleaseAgeExclude:
   - '@next/swc-win32-x64-msvc@16.3.5'
+  - '@serwist/build@9.5.13'
+  - '@serwist/turbopack@9.5.13'
+  - '@serwist/utils@9.5.13'
+  - '@serwist/window@9.5.13'
+  - serwist@9.5.13

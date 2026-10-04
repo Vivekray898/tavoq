@@ -19,7 +19,7 @@ import {
   createNotifications,
   sendEventEmail,
 } from "@/lib/notifications";
-import { ALLOWED_FILE_TYPES, MAX_FILE_SIZE } from "@/lib/constants";
+import { ALLOWED_FILE_TYPES, MAX_FILE_SIZE, TASK_STATUS_LABELS } from "@/lib/constants";
 import type { ActionResponse, Task, TaskStatus, TaskPriority } from "@/types/database";
 
 // ──────────────────────────────────────────────
@@ -793,6 +793,33 @@ export async function updateTaskStatus(
     }
 
     // ── Notifications ──
+    //
+    // Phase 2: plain status changes had no notification at all, so they
+    // produced no push either. This covers the ordinary moves (TODO ->
+    // IN_PROGRESS -> REVIEW and back), telling the assignee their own task
+    // moved. Deliberately skips SUBMITTED/COMPLETED/REVISION_REQUIRED,
+    // which have their own richer notifications below — notifying twice for
+    // one change is exactly the noise dedupe exists to prevent.
+    const STATUS_CHANGE_NOTIFIED = [
+      "SUBMITTED",
+      "COMPLETED",
+      "REVISION_REQUIRED",
+    ] as const;
+    const isPlainStatusChange =
+      currentTask.status !== status &&
+      !STATUS_CHANGE_NOTIFIED.includes(status as (typeof STATUS_CHANGE_NOTIFIED)[number]);
+
+    if (isPlainStatusChange && currentTask.assigned_to) {
+      await createNotification({
+        userId: currentTask.assigned_to,
+        type: "TASK_STATUS_CHANGED",
+        title: "Task status updated",
+        message: `"${currentTask.title}" moved to ${TASK_STATUS_LABELS[status] ?? status}`,
+        referenceType: "task",
+        referenceId: taskId,
+      });
+    }
+
     if (status === "SUBMITTED" && currentTask.assigned_to) {
       const { data: admins } = await supabase
         .from("profiles")

@@ -7,6 +7,11 @@ import type {
   ResourceType,
   LabelColor,
 } from "@/types/database";
+import type {
+  LedgerStatus,
+  LedgerPaymentType,
+  PaymentMethod,
+} from "@/lib/payments/adjustments";
 
 // ──────────────────────────────────────────────
 // Brand
@@ -160,6 +165,35 @@ export const PAYMENT_STATUS_COLORS: Record<PaymentStatus, string> = {
   NOT_APPLICABLE: "bg-muted text-muted-foreground",
   PENDING: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
   PAID: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+};
+
+// Ledger status (migration 025). Distinct from PAYMENT_STATUS_* above,
+// which belongs to `tasks`. A ledger row can be CANCELLED; a task cannot,
+// so the two label sets must not be merged.
+export const LEDGER_STATUS_LABELS: Record<LedgerStatus, string> = {
+  PENDING: "Pending",
+  PAID: "Paid",
+  CANCELLED: "Cancelled",
+};
+
+export const LEDGER_STATUS_COLORS: Record<LedgerStatus, string> = {
+  PENDING: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  PAID: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  CANCELLED: "bg-muted text-muted-foreground",
+};
+
+export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
+  UPI: "UPI",
+  BANK_TRANSFER: "Bank transfer",
+  CASH: "Cash",
+  OTHER: "Other",
+};
+
+export const LEDGER_PAYMENT_TYPE_LABELS: Record<LedgerPaymentType, string> = {
+  TASK_PAYOUT: "Task payout",
+  CUSTOM: "Custom",
+  BONUS: "Bonus",
+  ADJUSTMENT: "Adjustment",
 };
 
 // ──────────────────────────────────────────────
