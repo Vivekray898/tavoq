@@ -17,7 +17,11 @@ import type {
 // Brand
 // ──────────────────────────────────────────────
 
-export const APP_NAME = "Taskora";
+export const APP_NAME = "Taskora"; // public-facing brand, used verbatim on the consent screen
+
+export const SUPPORT_EMAIL = process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "support@creativoxa.com"; // public legal contact — replace before submitting to Google
+
+export const OPERATOR_NAME = process.env.NEXT_PUBLIC_OPERATOR_NAME ?? "Taskora"; // replace with your legal entity name if different
 
 // ──────────────────────────────────────────────
 // Status model (§27) — exactly five task statuses

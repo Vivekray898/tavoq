@@ -65,7 +65,7 @@ export function MobileNavDrawer({
   }, [pathname]);
 
   function isActive(href: string) {
-    if (href === "/") return pathname === "/";
+    if (href === "/dashboard") return pathname === "/dashboard";
     return pathname.startsWith(href);
   }
 
@@ -100,7 +100,7 @@ export function MobileNavDrawer({
           style={{ paddingTop: "env(safe-area-inset-top)" }}
         >
           <Link
-            href="/"
+            href="/dashboard"
             className="flex items-center gap-2.5 py-3.5"
             aria-label={`${APP_NAME} home`}
           >

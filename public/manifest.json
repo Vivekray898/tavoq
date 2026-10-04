@@ -1,11 +1,11 @@
 {
-  "id": "/",
+  "id": "/dashboard",
   "name": "Taskora",
   "short_name": "Taskora",
   "description": "Simple team work management for your agency.",
   "lang": "en",
   "dir": "ltr",
-  "start_url": "/",
+  "start_url": "/dashboard",
   "scope": "/",
   "display": "standalone",
   "background_color": "#ffffff",

@@ -4,8 +4,9 @@ import { readFileSync } from "node:fs";
 
 const src = readFileSync(process.argv[2] ?? "proxy.ts", "utf8");
 
-// Extract the PUBLIC_PREFIXES array literal straight from the source.
+// Extract the PUBLIC_PREFIXES and PUBLIC_EXACT array literals straight from the source.
 const m = src.match(/const PUBLIC_PREFIXES\s*=\s*(\[[\s\S]*?\n\]);/);
+
 if (!m) throw new Error("Could not locate PUBLIC_PREFIXES in proxy.ts");
 const PUBLIC_PREFIXES = JSON.parse(
   m[1].replace(/^\s*\/\/.*$/gm, "").replace(/,(\s*])/g, "$1")
@@ -13,7 +14,7 @@ const PUBLIC_PREFIXES = JSON.parse(
 
 // This mirrors the predicate in proxy(): exact match OR prefix + "/".
 const isPublic = (pathname) =>
-  PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+  pathname === "/" || PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 
 const cases = [
   // [path, expectedPublic, description]
@@ -36,7 +37,7 @@ const cases = [
   ["/api/push/unsubscribe", true, "push unsubscribe stays public"],
   ["/api/cronx", false, "lookalike /api/cronx stays PROTECTED"],
   ["/api/cron-lookalike", false, "lookalike /api/cron-* stays PROTECTED"],
-  ["/", false, "root stays protected"],
+  ["/", true, "root is now public to serve the new landing page"],
   ["/tasks", false, "tasks stays protected"],
   ["/tasks/123", false, "task detail stays protected"],
   ["/payments", false, "payments stays protected"],

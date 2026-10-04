@@ -22,7 +22,7 @@ export function MobileMenuButton({ onMenuClick }: { onMenuClick: () => void }) {
     /^\/(tasks|projects|clients|employees)\/[^/]+$/.test(pathname) ||
     /^\/(tasks|projects|clients|employees)\/[^/]+\/edit$/.test(pathname);
 
-  if (pathname !== "/" && !isDetail) return null;
+  if (pathname !== "/dashboard" && !isDetail) return null;
 
   return (
     <div

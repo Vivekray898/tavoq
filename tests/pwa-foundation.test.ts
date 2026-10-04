@@ -82,7 +82,7 @@ describe("web app manifest", () => {
     const m = manifest();
     assert.ok(m.name, "name");
     assert.ok(m.short_name, "short_name");
-    assert.equal(m.start_url, "/");
+    assert.equal(m.start_url, "/dashboard");
     assert.equal(m.scope, "/");
     assert.equal(m.display, "standalone");
     assert.match(m.theme_color, /^#[0-9a-f]{3,8}$/i);
@@ -131,7 +131,7 @@ describe("web app manifest", () => {
 
   test("declares a stable id and language", () => {
     const m = manifest();
-    assert.equal(m.id, "/");
+    assert.equal(m.id, "/dashboard");
     assert.equal(m.lang, "en");
   });
 });

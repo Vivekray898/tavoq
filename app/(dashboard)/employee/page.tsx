@@ -7,7 +7,7 @@ export default async function EmployeePage() {
   // Anyone who is not an employee goes to "/" rather than to /admin.
   // /admin redirects every non-super-admin back to "/", so aiming here
   // would send a manager in a loop between the two pages.
-  if (profile.role !== "EMPLOYEE") redirect("/");
+  if (profile.role !== "EMPLOYEE") redirect("/dashboard");
 
   return <EmployeeDashboard firstName={profile.full_name.split(" ")[0]} />;
 }

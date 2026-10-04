@@ -73,7 +73,7 @@ export const STAFF_ROLES: UserRole[] = ["SUPER_ADMIN", "MANAGER"];
 
 /** Every destination in the app, in drawer order. */
 const ALL_ITEMS: NavItem[] = [
-  { label: "Overview", href: "/", icon: LayoutDashboard },
+  { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
   { label: "Tasks", href: "/tasks", icon: CheckSquare },
   { label: "Calendar", href: "/calendar", icon: CalendarDays },
   { label: "Projects", href: "/projects", icon: FolderKanban, roles: STAFF_ROLES },
@@ -92,7 +92,7 @@ const ALL_ITEMS: NavItem[] = [
 /** Sections for a role, preserving ALL_ITEMS order within each. */
 function sectionsFor(items: NavItem[]): NavSection[] {
   const sections: NavSection[] = [
-    { items: items.filter((i) => i.href === "/") },
+    { items: items.filter((i) => i.href === "/dashboard") },
     {
       title: "Work",
       items: items.filter((i) =>

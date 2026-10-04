@@ -18,11 +18,14 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://task.creativoxa.com";
+
 export const metadata: Metadata = {
   title: {
     default: "Taskora",
     template: "%s — Taskora",
   },
+  metadataBase: new URL(appUrl),
   description: "Simple team work management for your agency.",
   manifest: "/manifest.json",
   applicationName: "Taskora",

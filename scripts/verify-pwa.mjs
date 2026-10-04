@@ -126,7 +126,7 @@ async function main() {
       Boolean(
         manifest.name &&
           manifest.short_name &&
-          manifest.start_url === "/" &&
+          manifest.start_url === "/dashboard" &&
           manifest.scope === "/" &&
           manifest.display === "standalone"
       ),

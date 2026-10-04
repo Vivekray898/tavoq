@@ -46,7 +46,7 @@ export function MobileHeader({ onMenuClick }: { onMenuClick: () => void }) {
   const isDetail =
     /^\/(tasks|projects|clients|employees)\/[^/]+$/.test(pathname) ||
     /^\/(tasks|projects|clients|employees)\/[^/]+\/edit$/.test(pathname);
-  if (isDetail || pathname === "/") return null;
+  if (isDetail || pathname === "/dashboard") return null;
 
   const entry = TITLES.find((t) => t.match(pathname));
   const title = entry?.title || "";

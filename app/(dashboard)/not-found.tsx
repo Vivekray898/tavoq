@@ -22,7 +22,7 @@ export default function NotFound() {
       <p className="mt-1 max-w-sm text-sm text-muted-foreground">
         The page you&apos;re looking for doesn&apos;t exist or may have been moved.
       </p>
-      <Link href="/" className="mt-6">
+      <Link href="/dashboard" className="mt-6">
         <Button>Back to home</Button>
       </Link>
     </div>

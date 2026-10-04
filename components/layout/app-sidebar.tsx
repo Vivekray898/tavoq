@@ -14,7 +14,7 @@ export function AppSidebar({ role }: { role: UserRole }) {
   const sections = getNavForRole(role).desktop;
 
   function isActive(href: string) {
-    if (href === "/") return pathname === "/";
+    if (href === "/dashboard") return pathname === "/dashboard";
     return pathname.startsWith(href);
   }
 
@@ -22,7 +22,7 @@ export function AppSidebar({ role }: { role: UserRole }) {
     <aside className="hidden lg:flex lg:w-60 lg:shrink-0 lg:flex-col lg:border-r bg-sidebar text-sidebar-foreground">
       {/* Logo */}
       <div className="flex h-14 items-center px-5">
-        <Link href="/" className="flex items-center gap-2.5">
+        <Link href="/dashboard" className="flex items-center gap-2.5">
           <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <span className="text-sm font-bold leading-none">T</span>
           </div>

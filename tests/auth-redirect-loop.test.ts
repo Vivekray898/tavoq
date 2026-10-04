@@ -32,8 +32,8 @@ describe("getAccountDestination — the post-sign-in routing table", () => {
   });
 
   test("ACTIVE manager and employee land on the workspace root", () => {
-    assert.equal(getAccountDestination({ status: "ACTIVE", role: "MANAGER" }), "/");
-    assert.equal(getAccountDestination({ status: "ACTIVE", role: "EMPLOYEE" }), "/");
+    assert.equal(getAccountDestination({ status: "ACTIVE", role: "MANAGER" }), "/dashboard");
+    assert.equal(getAccountDestination({ status: "ACTIVE", role: "EMPLOYEE" }), "/dashboard");
   });
 
   test("PENDING lands on /pending, never on /login", () => {
@@ -73,7 +73,7 @@ describe("getAccountDestination — the post-sign-in routing table", () => {
 
   test("every destination is a real page in this app", () => {
     const pages = [
-      "app/(dashboard)/page.tsx",
+      "app/(dashboard)/dashboard/page.tsx",
       "app/(dashboard)/admin/page.tsx",
       "app/(auth)/pending/page.tsx",
       "app/(auth)/suspended/page.tsx",

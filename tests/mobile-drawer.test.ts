@@ -30,7 +30,7 @@ const sidebarHrefs = (role: UserRole) =>
     .map((i) => i.href);
 
 describe("role matrix", () => {
-  const ALL_ROLES = ["/", "/tasks", "/calendar", "/notifications"];
+  const ALL_ROLES = ["/dashboard", "/tasks", "/calendar", "/notifications"];
   const STAFF_ONLY = ["/projects", "/clients", "/employees"];
 
   test("shared destinations are visible to all three roles", () => {
@@ -160,7 +160,7 @@ describe("the hamburger button", () => {
     // separate trigger the drawer would be unreachable on the two most
     // visited screens.
     const src = strip(read("../components/layout/mobile-menu-button.tsx"));
-    assert.match(src, /pathname !== "\/"/);
+    assert.match(src, /pathname !== "\/dashboard"/);
     assert.match(src, /isDetail/);
     assert.match(src, /lg:hidden/);
   });

@@ -327,7 +327,7 @@ export function getAccountDestination(
   if (!profile) return "/pending";
   if (profile.status === "SUSPENDED") return "/suspended";
   if (profile.status !== "ACTIVE" || !profile.role) return "/pending";
-  return profile.role === "SUPER_ADMIN" ? "/admin" : "/";
+  return profile.role === "SUPER_ADMIN" ? "/admin" : "/dashboard";
 }
 
 /** Display labels for the UI. */

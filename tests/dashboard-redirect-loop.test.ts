@@ -42,8 +42,8 @@ describe("dashboard workspace pages do not redirect to each other", () => {
   });
 
   test("both pages fall through to / for every non-matching role", () => {
-    assert.ok(redirectTargets(admin).includes("/"));
-    assert.ok(redirectTargets(employee).includes("/"));
+    assert.ok(redirectTargets(admin).includes("/dashboard"));
+    assert.ok(redirectTargets(employee).includes("/dashboard"));
   });
 
   test("no page redirects to itself", () => {
@@ -61,8 +61,8 @@ describe("dashboard workspace pages do not redirect to each other", () => {
   test("no page can produce a cycle for any role", () => {
     // Simulate both gates for each role. A cycle is any repeated visit.
     const graph: Record<string, (role: string) => string | null> = {
-      "/admin": (r) => (r === "SUPER_ADMIN" ? null : "/"),
-      "/employee": (r) => (r === "EMPLOYEE" ? null : "/"),
+      "/admin": (r) => (r === "SUPER_ADMIN" ? null : "/dashboard"),
+      "/employee": (r) => (r === "EMPLOYEE" ? null : "/dashboard"),
     };
 
     for (const role of ["SUPER_ADMIN", "MANAGER", "EMPLOYEE"]) {

@@ -26,11 +26,21 @@ const PUBLIC_PREFIXES = [
   "/icons",
   "/sw.js",
   "/api/push",
+  "/privacy",
+  "/terms",
+  "/sitemap.xml",
   // Vercel Cron invokes these with `Authorization: Bearer $CRON_SECRET`
   // and no session cookie, so the proxy must let them through — the
   // route handler verifies the secret itself.
   "/api/cron",
 ];
+
+/**
+ * Routes that must be public with no prefix match. `/` is an *exact*
+ * match: every other path starts with "/", so a prefix entry of "/" would
+ * make the entire app public — it is deliberately not in PUBLIC_PREFIXES.
+ */
+export const PUBLIC_EXACT = new Set(["/"]);
 
 /**
  * Local ES256 JWT verification (asymmetric signing keys — the project's
@@ -127,9 +137,11 @@ async function readJwtClaims(
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  const isPublic = PUBLIC_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
-  );
+  const isPublic =
+    PUBLIC_EXACT.has(pathname) ||
+    PUBLIC_PREFIXES.some(
+      (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+    );
 
   let response = NextResponse.next({ request });
 
