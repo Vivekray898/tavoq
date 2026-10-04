@@ -227,3 +227,60 @@ Not yet written — checkboxes open as each step lands.
   in step C. Existing PAID rows are legitimately `OTHER`.
 - The `payment-proofs` Storage bucket does not exist yet — needed for
   proof upload, which is the remaining part of step C.
+---
+
+## Ledger safety audit (2026-10-04) — migrations 026 and 027
+
+An audit of the live schema found that financial history was being
+destroyed by ordinary record deletion. Read from `pg_constraint`, not from
+the migration files.
+
+### Fixed
+
+| Constraint | Before | After |
+| --- | --- | --- |
+| `payments_task_id_fkey` | `ON DELETE CASCADE` | `ON DELETE SET NULL` |
+| `payments_employee_id_fkey` | `ON DELETE CASCADE` | `ON DELETE RESTRICT` |
+| `payment_events_payment_id_fkey` | `ON DELETE CASCADE` | `ON DELETE RESTRICT` |
+
+`payments.task_id` and `payments.employee_id` are both nullable, so no
+column was altered and no row was rewritten.
+
+Migration 026 changes only these three constraints. Migration 027 exists
+because 025's `payments_task_payout_has_task` CHECK blocked the new
+`SET NULL` action, which would have made deleting a paid task impossible;
+it is replaced by a BEFORE trigger that still rejects a `TASK_PAYOUT`
+written with no task, but recognises referential orphaning.
+
+### Verified against production
+
+Deleting a task leaves the payment standing with `task_id` null, a PAID
+payment keeps its method, reference, instant and amount, an audit event
+survives, and a payment carrying events cannot be deleted. All existing
+rows were unchanged: the ledger fingerprint was identical before and
+after both migrations.
+
+### Known blocker — unrelated to this repair
+
+`enforce_task_update_rules()` compares `role = 'ADMIN'`, but `user_role`
+is now `('SUPER_ADMIN','EMPLOYEE','MANAGER')`. **Every `UPDATE` to a
+`tasks` row currently fails** with:
+
+```
+22P02: invalid input value for enum user_role: "ADMIN"
+```
+
+This also blocks inserting any task-linked payment, because
+`sync_task_payment_status` updates the task. It is pre-existing and was
+not introduced here. Until it is fixed, task editing and task-linked
+payment creation are inoperative.
+
+### Reported, not changed
+
+- `activity_task_id_fkey` — deleting a task still erases its own activity
+  history. This is why the two lost payments cannot be traced.
+- `tasks_project_id_fkey` — deleting a project still deletes its tasks.
+  Payments survive after 026; the work items do not.
+- `payments_payee_fkey` — `ON DELETE SET NULL` on a `NOT NULL` column, so
+  it contradicts itself and fails with a not-null error rather than a
+  clean referential one. It fails safe by accident.
