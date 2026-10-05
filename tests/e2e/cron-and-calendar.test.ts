@@ -96,19 +96,25 @@ describe("cron endpoint", () => {
 });
 
 describe("calendar ownership", () => {
-  it("pushes only the caller's own assigned tasks", () => {
+  it("pushes only tasks belonging to the caller's own sync mode", () => {
+    // PERSONAL: assigned_to = caller. ADMIN: created_by = caller. Either
+    // way the row is scoped to the signed-in user, and the mode is read
+    // from their role rather than chosen by the request.
     const src = code(CALENDAR);
     const single = src.slice(src.indexOf("export async function syncTaskToCalendar"));
     assert.match(
       single.slice(0, single.indexOf("\n}")),
-      /\.eq\(\s*["']assigned_to["']\s*,\s*profile\.id\s*\)/
+      /\.eq\(\s*mode\s*===\s*["']admin_assignment["']\s*\?\s*["']created_by["']\s*:\s*["']assigned_to["']\s*,\s*profile\.id\s*\)/
+    );
+
+    const selector = src.slice(src.indexOf("async function getTasksForCalendarSync"));
+    assert.match(
+      selector.slice(0, selector.indexOf("\n}")),
+      /\.eq\(\s*mode\s*===\s*["']admin_assignment["']\s*\?\s*["']created_by["']\s*:\s*["']assigned_to["']\s*,\s*userId\s*\)/
     );
 
     const full = src.slice(src.indexOf("async function fullSyncForUser"));
-    assert.match(
-      full.slice(0, full.indexOf("\n}")),
-      /\.eq\(\s*["']assigned_to["']\s*,\s*userId\s*\)/
-    );
+    assert.match(full, /getTasksForCalendarSync\(userId,\s*mode\)/);
   });
 
   it("clears google_event_id when a task changes hands", () => {
@@ -129,9 +135,13 @@ describe("calendar ownership", () => {
     );
     assert.match(
       full,
-      /status\s*===\s*["']COMPLETED["'][\s\S]{0,400}?google_event_id:\s*null/,
-      "a completed task's event id is cleared, so the event is not kept"
+      /status\s*===\s*["']COMPLETED["'][\s\S]{0,900}?deleteEvent\(/,
+      "a completed task's event must be deleted, not annotated"
     );
+    // ...and the mapping is dropped for THIS user only, so another user's
+    // copy of the same task survives.
+    assert.match(full, /forgetMapping\(/);
+    assert.match(full, /\.eq\(\s*["']user_id["']\s*,\s*userId\s*\)/);
     assert.match(code(CALENDAR).slice(0), /COMPLETED/);
   });
 
@@ -159,7 +169,12 @@ describe("calendar ownership", () => {
     const postAt = body.indexOf('method: "POST"');
     assert.ok(putAt > -1, "an existing event must be updated, not recreated");
     assert.ok(postAt > putAt, "creation must be the fallback, after the update path");
-    assert.match(body, /if\s*\(task\.google_event_id\)/);
+    // The existence test is this user's mapping, not the task-global column.
+    assert.match(body, /if\s*\(existing\)/);
+    assert.match(
+      body,
+      /calendar_events[\s\S]{0,300}?\.eq\("user_id",\s*userId\)/
+    );
   });
 
   it("collects per-task errors instead of aborting the batch", () => {

@@ -149,7 +149,16 @@ export interface SyncableTask {
   priority: string;
   deadline: string | null;
   project_id: string;
+  /**
+   * Global to the task, NOT per user. With two calendars holding the same
+   * task it holds whichever id was written last, so sync must resolve a
+   * user's event through calendar_events rather than read this. Read here
+   * only as a legacy fallback for rows predating that table.
+   */
   google_event_id: string | null;
+  /** Who put the work in motion — the admin-assignment sync's filter. */
+  created_by?: string | null;
+  assigned_to?: string | null;
   project?: { name: string; client?: { name: string } | null } | null;
 }
 

@@ -119,19 +119,49 @@ describe("syncAssigneeCalendar", () => {
   test("a taskId narrows the work to one task; its absence means full reconcile", () => {
     const src = gcal();
     const fn = src.slice(src.indexOf("async function syncAssigneeCalendar"));
-    assert.match(fn.slice(0, 1200), /if \(taskId\)[\s\S]*?syncSingleTaskForUser/);
-    assert.match(fn.slice(0, 1200), /fullSyncForUser\(assigneeId\)/);
+    assert.match(fn.slice(0, 1600), /if \(taskId\)[\s\S]*?syncSingleTaskForUser/);
+    // The mode is resolved per user, so the full reconcile reaches the
+    // right task set for whoever it is for.
+    assert.match(fn.slice(0, 1600), /fullSyncForUser\(assigneeId, await calendarSyncModeForUserId\(assigneeId\)\)/);
+  });
+
+  test("the actor's own admin calendar is reconciled too", () => {
+    // A SUPER_ADMIN's calendar is the work they assigned. Without this
+    // their calendar would only ever update on a manual sync.
+    const src = gcal();
+    const fn = src.slice(src.indexOf("async function syncAssigneeCalendar"));
+    assert.match(fn.slice(0, 3000), /actorId !== assigneeId/);
+    assert.match(fn.slice(0, 3000), /actorMode === "admin_assignment"/);
+    assert.match(fn.slice(0, 3000), /syncSingleTaskForUser\(actorId, actorRow, taskId, actorMode\)/);
   });
 
   test("removeCalendarEvent no-ops without a token row too", () => {
     const src = gcal();
-    const fn = src.slice(
-      src.indexOf("async function removeCalendarEvent"),
-      src.indexOf("async function removeCalendarEvent") + 900
-    );
+    // Exported for nothing now — the task-delete path goes through
+    // removeCalendarEventsForTask, which fans out over the mappings.
+    // Match on the definition, not the longer sibling's name.
+    const at = src.indexOf("async function removeCalendarEvent(");
+    assert.ok(at > -1, "removeCalendarEvent not found");
+    const fn = src.slice(at, at + 900);
     assert.match(fn, /if \(!userId\) return/);
     assert.match(fn, /if \(!row\) return/);
     assert.match(fn, /deleteEvent\(row, googleEventId, accessToken\)/);
+  });
+
+  test("deleting a task clears the event from every calendar holding it", () => {
+    const src = gcal();
+    const at = src.indexOf("export async function removeCalendarEventsForTask");
+    assert.ok(at > -1, "removeCalendarEventsForTask not found");
+    const fn = src.slice(at, src.indexOf("\n}", at));
+    // A task lives on the assignee's calendar AND the creating admin's.
+    // Clearing only one strands the other's event permanently, because
+    // the mapping rows cascade away with the task.
+    assert.match(fn, /from\(\s*"calendar_events"\s*\)[\s\S]*?\.eq\("task_id", taskId\)/);
+    assert.match(fn, /for \(const mapping of rows\)/);
+    // Each calendar is written with THAT user's own token.
+    assert.match(fn, /removeCalendarEvent\(mapping\.user_id, mapping\.google_event_id\)/);
+    // One user's calendar failing must not abort the rest.
+    assert.match(fn, /catch \(err\) \{/);
   });
 });
 
@@ -281,38 +311,55 @@ describe("a failed sync refreshes the connection status", () => {
 describe("task mutations trigger calendar sync", () => {
   const src = () => strip(read("../lib/actions/tasks.ts"));
 
-  test("exactly five mutation paths call a sync entry point", () => {
+  test("exactly six mutation paths call a sync entry point", () => {
     const s = src();
     // The import is a bare `syncAssigneeCalendar,` with no paren, so every
-    // `(` match is a real call site. Exactly five: create, update x2
-    // (old + new assignee), status, bulk.
+    // `(` match is a real call site. Six: create, update x3 (previous
+    // assignee, new assignee, and the actor's own admin calendar when
+    // there was no reassignment), status, bulk.
     const calls = s.match(/syncAssigneeCalendar\(/g) ?? [];
-    assert.equal(calls.length, 5, `expected 5 call sites, got ${calls.length}`);
+    assert.equal(calls.length, 6, `expected 6 call sites, got ${calls.length}`);
   });
 
-  test("creation syncs the new assignee with the task id", () => {
+  test("creation syncs the new assignee and the creator's own calendar", () => {
     const s = src();
     const idx = s.indexOf("async function createTaskAction");
     const body = s.slice(idx, s.indexOf("async function", idx + 40));
-    assert.match(body, /syncAssigneeCalendar\(task\.assigned_to, task\.id\)/);
+    // The creator is passed so a SUPER_ADMIN's calendar — the work they
+    // assigned — updates without waiting for a manual sync.
+    assert.match(body, /syncAssigneeCalendar\(task\.assigned_to, task\.id, profile\.id\)/);
   });
 
   test("reassignment syncs the PREVIOUS assignee (full) and the new one (single)", () => {
     const s = src();
     const idx = s.indexOf("async function updateTaskAction");
     const body = s.slice(idx, s.indexOf("async function", idx + 40));
-    assert.match(body, /syncAssigneeCalendar\(before\.assigned_to\)/);
-    assert.match(body, /syncAssigneeCalendar\(task\.assigned_to, task\.id\)/);
+    assert.match(body, /syncAssigneeCalendar\(before\.assigned_to, undefined, profile\.id\)/);
+    assert.match(body, /syncAssigneeCalendar\(task\.assigned_to, task\.id, profile\.id\)/);
+  });
+
+  test("a plain edit still refreshes the actor's own admin calendar", () => {
+    // Without this, changing a deadline on a task the admin assigned to
+    // somebody else would only reach that employee's calendar.
+    const s = src();
+    const idx = s.indexOf("async function updateTaskAction");
+    const body = s.slice(idx, s.indexOf("async function", idx + 40));
+    assert.match(
+      body,
+      /if \(!reassigned\) \{[\s\S]{0,200}?syncAssigneeCalendar\(profile\.id, task\.id, profile\.id\)/
+    );
   });
 
   test("deletion removes the calendar event BEFORE the row is gone", () => {
     const s = src();
     const idx = s.indexOf("async function deleteTaskAction");
     const body = s.slice(idx, s.indexOf("async function", idx + 40));
-    const removeAt = body.indexOf("removeCalendarEvent");
-    assert.ok(removeAt > -1, "deleteTaskAction must call removeCalendarEvent");
+    // Every calendar holding the task, not only the assignee's — the task
+    // also lives on the calendar of whoever created it.
+    const removeAt = body.indexOf("removeCalendarEventsForTask");
+    assert.ok(removeAt > -1, "deleteTaskAction must call removeCalendarEventsForTask");
     assert.match(body.slice(removeAt - 200, removeAt + 200), /\.delete\(\)/);
-    // removeCalendarEvent must precede the delete() call in source order.
+    // removeCalendarEventsForTask must precede the delete() call in source order.
     assert.ok(
       removeAt < body.indexOf(".delete()"),
       "calendar event must be removed before the DB delete"
@@ -334,7 +381,7 @@ describe("task mutations trigger calendar sync", () => {
     const idx = s.indexOf("async function bulkUpdateTasks");
     const body = s.slice(idx, s.indexOf("async function", idx + 40));
     assert.match(body, /Set/);
-    assert.match(body, /for \(const assigneeId of [\s\S]*?syncAssigneeCalendar\(assigneeId\)/);
+    assert.match(body, /for \(const assigneeId of [\s\S]*?syncAssigneeCalendar\(assigneeId/);
     // No taskId in the bulk path — it reconciles whole calendars.
     assert.doesNotMatch(
       body.match(/syncAssigneeCalendar\(assigneeId[^)]*\)/)?.[0] ?? "",

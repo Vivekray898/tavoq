@@ -10,7 +10,7 @@ import {
 } from "@/lib/auth";
 import { canManageProject as canManageProjectRule } from "@/lib/permissions";
 import {
-  removeCalendarEvent,
+  removeCalendarEventsForTask,
   syncAssigneeCalendar,
 } from "@/lib/actions/google-calendar";
 import { taskSchema, type TaskInput } from "@/validators/schemas";
@@ -481,7 +481,11 @@ export async function createTaskAction(
     // §71 — put it on the assignee's calendar now, not next time they
     // press "Sync now". Fire-and-forget: the task is already saved, and
     // a calendar failure must not turn a successful create into an error.
-    void syncAssigneeCalendar(task.assigned_to, task.id);
+    //
+    // The creator is passed too: a SUPER_ADMIN's calendar holds the work
+    // they assigned, not the work assigned to them, so without this the
+    // admin's calendar would only update on a manual sync.
+    void syncAssigneeCalendar(task.assigned_to, task.id, profile.id);
 
     return { success: true, data: task };
   } catch (err) {
@@ -613,9 +617,15 @@ export async function updateTaskAction(
     // reconciling their whole calendar rather than by event id — which
     // is why that side gets no taskId.
     if (reassigned && before && before.assigned_to && before.assigned_to !== task.assigned_to) {
-      void syncAssigneeCalendar(before.assigned_to);
+      void syncAssigneeCalendar(before.assigned_to, undefined, profile.id);
     }
-    void syncAssigneeCalendar(task.assigned_to, task.id);
+    void syncAssigneeCalendar(task.assigned_to, task.id, profile.id);
+    // A deadline or title edit on a task the actor did not create still
+    // belongs on the actor's calendar when they are a super admin, so the
+    // admin copy is refreshed even without a reassignment.
+    if (!reassigned) {
+      void syncAssigneeCalendar(profile.id, task.id, profile.id);
+    }
 
     return { success: true, data: task };
   } catch (err) {
@@ -661,12 +671,13 @@ export async function deleteTaskAction(id: string): Promise<ActionResponse> {
       }
     }
 
-    // §71 — remove the calendar event while google_event_id is still
-    // readable. After the delete the row is gone, so the id can no
-    // longer be found and the event would be orphaned in Google until
-    // the assignee manually deleted it.
+    // §71 — remove the calendar events while the mappings are still
+    // readable. After the delete the row is gone, so nothing can point at
+    // the events again. Every calendar holding the task is cleaned, not
+    // just the assignee's: the task also lives on the calendar of the
+    // admin who created it.
     if (task.google_event_id) {
-      await removeCalendarEvent(task.assigned_to, task.google_event_id);
+      await removeCalendarEventsForTask(id, task.assigned_to, task.google_event_id);
     }
 
     const { error } = await supabase.from("tasks").delete().eq("id", id);
@@ -901,7 +912,7 @@ export async function updateTaskStatus(
       task.assigned_to &&
       (status === "COMPLETED" || previousStatus === "COMPLETED")
     ) {
-      void syncAssigneeCalendar(task.assigned_to, taskId);
+      void syncAssigneeCalendar(task.assigned_to, taskId, profile.id);
     }
 
     return { success: true, data: task };
@@ -1243,8 +1254,10 @@ export async function bulkUpdateTasks(
       for (const assigneeId of assignees) {
         // No taskId: fullSync reconciles everything that assignee owns,
         // which is cheaper than one call per id and also repairs events
-        // the bulk update orphaned.
-        void syncAssigneeCalendar(assigneeId);
+        // the bulk update orphaned. The actor is included so the staff
+        // member who made the change sees the same work on their own
+        // calendar.
+        void syncAssigneeCalendar(assigneeId, undefined, profile.id);
       }
     }
 

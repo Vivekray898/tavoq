@@ -57,8 +57,24 @@ describe("Sync now", () => {
   });
 
   it("still reports the counts on a clean run", () => {
-    assert.match(handleSync, /created\s*\+\s*updated\s*\+\s*removed\s*===\s*0/);
+    assert.match(handleSync, /r\.created\s*\+\s*r\.updated\s*\+\s*r\.removed\s*===\s*0/);
     assert.match(handleSync, /Calendar is already up to date/);
+  });
+
+  it("distinguishes 'nothing matched' from 'nothing changed'", () => {
+    // The bug this guards: a sync that matched no tasks reported
+    // "already up to date", which is a clean-zero indistinguishable from
+    // success. Zero eligible tasks is a different fact and says so.
+    assert.match(handleSync, /r\.eligibleTasks\s*===\s*0/);
+    assert.match(handleSync, /No eligible/);
+    // ...and the up-to-date message reports how many were checked.
+    assert.match(handleSync, /eligibleTasks === 1 \? "task" : "tasks"/);
+  });
+
+  it("labels the action by the caller's sync mode", () => {
+    assert.match(PANEL, /syncMode === "admin_assignment"/);
+    assert.match(PANEL, /Sync assigned work/);
+    assert.match(PANEL, /Sync my assigned tasks/);
   });
 
   it("refreshes the status query afterwards", () => {

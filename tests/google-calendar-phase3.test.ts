@@ -382,8 +382,11 @@ describe("settings UI surfaces the reconnect state", () => {
   test("still exposes the full idempotent resync", () => {
     const src = ui();
     assert.match(src, /syncAllTasksToCalendar\(\)/);
-    assert.match(src, /Sync now/);
-    // Idempotency is what makes "Sync now" safe to press repeatedly.
+    // The label now names the sync mode rather than saying "Sync now"
+    // for both an admin's assigned work and an employee's own tasks.
+    assert.match(src, /Sync assigned work/);
+    assert.match(src, /Sync my assigned tasks/);
+    // Idempotency is what makes the button safe to press repeatedly.
     const actionSrc = strip(read("../lib/actions/google-calendar.ts"));
     assert.match(actionSrc, /extendedProperties/);
   });

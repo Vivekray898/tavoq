@@ -36,16 +36,21 @@ function bodyOf(name: string): string {
 
 describe("task selection", () => {
   const fullSync = src.slice(src.indexOf("async function fullSyncForUser"));
+  const selector = src.slice(src.indexOf("async function getTasksForCalendarSync"));
 
-  it("only syncs tasks assigned to the caller", () => {
-    assert.match(fullSync.slice(0, fullSync.indexOf("\n}")), /\.eq\(\s*"assigned_to"\s*,\s*userId\s*\)/);
+  it("selects by the caller's mode: assigned_to or created_by", () => {
+    assert.match(
+      selector.slice(0, selector.indexOf("\n}")),
+      /\.eq\(\s*mode\s*===\s*"admin_assignment"\s*\?\s*"created_by"\s*:\s*"assigned_to"\s*,\s*userId\s*\)/
+    );
+    assert.match(fullSync, /getTasksForCalendarSync\(userId,\s*mode\)/);
   });
 
   it("skips completed tasks rather than filtering them in SQL", () => {
     // Done in the loop so a completed task can still have its mapping
     // cleared; an SQL filter would strand the event id.
     assert.match(fullSync, /if\s*\(\s*task\.status\s*===\s*"COMPLETED"\s*\)/);
-    assert.match(fullSync, /update\(\{\s*google_event_id:\s*null\s*\}/);
+    assert.match(fullSync, /google_event_id:\s*null/);
   });
 
   it("does not require google_event_id to be null", () => {
@@ -58,7 +63,7 @@ describe("task selection", () => {
   });
 
   it("is idempotent: PUT when an event exists, POST when it does not", () => {
-    assert.match(fullSync, /if\s*\(\s*task\.google_event_id\s*\)/);
+    assert.match(fullSync, /if\s*\(\s*existing\s*\)/);
     assert.match(fullSync, /method:\s*"PUT"/);
     assert.match(fullSync, /method:\s*"POST"/);
     const putAt = fullSync.indexOf('method: "PUT"');
@@ -66,8 +71,69 @@ describe("task selection", () => {
     assert.ok(putAt < postAt, "the existing-event branch must come first");
   });
 
-  it("writes the created event id back onto the task", () => {
-    assert.match(fullSync, /update\(\{\s*google_event_id:\s*created\.id\s*\}/);
+  it("writes the created event id to the per-user mapping", () => {
+    // calendar_events, NOT tasks.google_event_id — the latter is global to
+    // the task and would overwrite the other user's mapping target.
+    assert.match(
+      fullSync,
+      /recordCalendarEventMapping\(userId,\s*task\.id,\s*created\.id,\s*mode\)/
+    );
+    assert.match(fullSync, /if\s*\(mode\s*===\s*"personal"\)\s*\{\s*\n?\s*await admin\s*\n?\s*\.from\("tasks"\)/);
+  });
+});
+
+describe("a zero-change run must explain itself", () => {
+  const fullSync = src.slice(src.indexOf("async function fullSyncForUser"));
+
+  it("reports every eligibility bucket, not just the changes", () => {
+    for (const field of [
+      "rawTasksLoaded",
+      "eligibleTasks",
+      "skippedCompleted",
+      "skippedMissingDeadline",
+      "skippedOther",
+      "alreadyMapped",
+      "created",
+      "updated",
+      "removed",
+      "unchanged",
+      "errors",
+    ]) {
+      assert.match(
+        src,
+        new RegExp(`${field}\\s*:`),
+        `SyncResult must carry ${field}`
+      );
+    }
+  });
+
+  it("counts the skips it performs", () => {
+    assert.match(fullSync, /result\.skippedCompleted\s*\+=/);
+    assert.match(fullSync, /result\.skippedMissingDeadline\s*\+=/);
+    assert.match(fullSync, /result\.eligibleTasks\s*\+=/);
+    assert.match(fullSync, /result\.alreadyMapped\s*\+=/);
+  });
+
+  it("records which strategy ran", () => {
+    assert.match(src, /mode:\s*CalendarSyncMode/);
+    assert.match(fullSync, /describeSyncResult\(result\)/);
+  });
+
+  it("treats a 2xx with no event id as a failure", () => {
+    // Otherwise the run reports created:0 with no error, which is the
+    // exact shape of the bug being fixed.
+    assert.match(fullSync, /if\s*\(!created\??\.id\)/);
+    assert.match(fullSync, /returned success without an event id/);
+  });
+
+  it("logs the calendar id, never a credential", () => {
+    assert.match(fullSync, /console\.log\("\[gcal-sync\] run"/);
+    assert.match(src, /describeSyncResult[\s\S]*?calendarId/);
+    // The summary must not carry token material. Bounded to the function
+    // body so an unrelated helper later in the file cannot fail this.
+    const start = src.indexOf("function describeSyncResult");
+    const summary = src.slice(start, src.indexOf("\n}", start));
+    assert.doesNotMatch(summary, /accessToken|refreshToken|clientSecret|Authorization/);
   });
 });
 
@@ -121,7 +187,7 @@ describe("error handling", () => {
     );
     assert.match(
       handler.slice(0, 600),
-      /return fullSyncForUser\(userId\)/,
+      /return fullSyncForUser\(userId,\s*mode\)/,
       "a 410 must fall back to a full re-sync"
     );
   });

@@ -86,22 +86,31 @@ export function GoogleCalendarConnect() {
     setWorking(null);
 
     if (result.success && result.data) {
-      const { created, updated, removed, errors } = result.data;
+      const r = result.data;
 
       // A per-task Google failure is collected rather than thrown, so
       // reporting only the totals would show a successful sync over a
       // list where every single insert failed.
-      if (errors.length > 0) {
+      if (r.errors.length > 0) {
         toast.error(
-          `Synced with ${errors.length} error${errors.length === 1 ? "" : "s"} — ${errors[0]}`
+          `${r.errors.length} ${r.errors.length === 1 ? "task" : "tasks"} could not be synchronized — ${r.errors[0]}`
+        );
+      } else if (r.eligibleTasks === 0) {
+        // Zero eligible is NOT "already up to date": nothing matched this
+        // calendar at all, and conflating the two is what made a broken
+        // selection look like a healthy one.
+        toast.info(
+          `No eligible ${r.mode === "admin_assignment" ? "assigned tasks" : "tasks"} were found for this calendar`
+        );
+      } else if (r.created + r.updated + r.removed === 0) {
+        toast.success(
+          `Calendar is already up to date — ${r.eligibleTasks} ${r.eligibleTasks === 1 ? "task" : "tasks"} checked`
         );
       } else {
         toast.success(
-          created + updated + removed === 0
-            ? "Calendar is already up to date"
-            : `Synced — ${created} added, ${updated} updated${
-                removed ? `, ${removed} removed` : ""
-              }`
+          `Synced — ${r.created} added, ${r.updated} updated${
+            r.removed ? `, ${r.removed} removed` : ""
+          }`
         );
       }
 
@@ -142,8 +151,12 @@ export function GoogleCalendarConnect() {
         {needsReconnect
           ? "Google access expired or was revoked. Reconnect to resume syncing your tasks."
           : connected
-            ? "Your assigned tasks are kept in sync with your Google Calendar."
-            : "Connect your Google account to see your assigned tasks on your calendar."}
+            ? data?.syncMode === "admin_assignment"
+              ? "The work you assign is kept in sync with your Google Calendar."
+              : "Your assigned tasks are kept in sync with your Google Calendar."
+            : data?.syncMode === "admin_assignment"
+              ? "Connect your Google account to see the work you assign on your calendar."
+              : "Connect your Google account to see your assigned tasks on your calendar."}
       </p>
 
       <div className="divide-y rounded-xl border bg-card">
@@ -162,6 +175,9 @@ export function GoogleCalendarConnect() {
                   {data?.lastSyncedAt
                     ? ` · last synced ${formatDate(data.lastSyncedAt)}`
                     : " · not synced yet"}
+                  {data?.eligibleTaskCount
+                    ? ` · ${data.eligibleTaskCount} eligible`
+                    : ""}
                 </p>
               </div>
               <Button
@@ -176,7 +192,9 @@ export function GoogleCalendarConnect() {
                 ) : (
                   <RefreshCw className="size-4" />
                 )}
-                Sync now
+                {data?.syncMode === "admin_assignment"
+                  ? "Sync assigned work"
+                  : "Sync my assigned tasks"}
               </Button>
             </div>
             <div className="flex items-center justify-between gap-4 px-4 py-3.5">

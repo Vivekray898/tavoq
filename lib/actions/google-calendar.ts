@@ -26,6 +26,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createNotification } from "@/lib/notifications";
 import { requireAuth } from "@/lib/auth";
+import { isSuperAdmin } from "@/lib/permissions";
 import { decryptToken, encryptToken } from "@/lib/crypto/google-token";
 import {
   backoffDelayMs,
@@ -36,7 +37,7 @@ import {
   shouldRetryStatus,
   type SyncableTask,
 } from "@/lib/google/calendar";
-import type { ActionResponse } from "@/types/database";
+import type { ActionResponse, UserRole } from "@/types/database";
 
 // ──────────────────────────────────────────────
 // Constants
@@ -218,7 +219,12 @@ async function getAccessToken(row: GoogleTokenRow): Promise<TokenBundle> {
       ...(rotated ? { refresh_token: rotated } : {}),
     })
     .eq("id", row.id);
-  console.log("[gcal-sync] getAccessToken: refresh SUCCESS, new_exp=", new Date(expiresAt).toISOString(), "upd_err=", upd.error);
+  // Non-sensitive: the new expiry and whether the row write landed. The
+  // tokens themselves never appear here.
+  console.log(
+    "[gcal-sync] refreshed access token",
+    { userId: row.user_id, expiresAt: new Date(expiresAt).toISOString(), writeError: upd.error?.message ?? null }
+  );
 
   return {
     accessToken: json.access_token,
@@ -262,8 +268,7 @@ function sleep(ms: number): Promise<void> {
  */
 async function googleFetch<T>(url: string, accessToken: string, init?: RequestInit): Promise<T> {
   let lastError: unknown;
-  const method = init?.method ?? "GET";
-  
+
   for (let attempt = 0; attempt < MAX_API_ATTEMPTS; attempt += 1) {
     try {
       const res = await fetch(url, {
@@ -282,7 +287,12 @@ async function googleFetch<T>(url: string, accessToken: string, init?: RequestIn
 
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as GoogleApiError;
-        console.error(`[gcal-sync] googleFetch: FAIL status=${res.status} body=${JSON.stringify(body).substring(0, 500)}`);
+        // Status and message only. Never the URL's query, never a header,
+        // never the request body.
+        console.error(
+          "[gcal-sync] googleFetch failed",
+          { status: res.status, message: body.error?.message ?? res.statusText }
+        );
         const error = new Error(
           `Google API ${res.status}: ${body.error?.message ?? res.statusText}`
         );
@@ -407,25 +417,45 @@ interface GoogleConnectionRow {
  * Unique on (user_id, task_id) and (user_id, google_event_id), so this is an
  * upsert — re-syncing updates in place instead of duplicating the mapping.
  * That uniqueness is what makes one-way sync idempotent at the data layer.
+ *
+ * PER-USER, WHICH IS WHAT MAKES TWO CALENDARS POSSIBLE
+ *
+ * The key is (user_id, task_id), not task_id. One task can therefore carry a
+ * DIFFERENT google_event_id in each user's calendar: the admin who assigned
+ * it and the employee doing it. `tasks.google_event_id` cannot express that —
+ * it is one column on the shared task row, so the second writer would
+ * overwrite the first and one user's event would become unaddressable.
+ * This table is what stops that; sync_mode records which strategy wrote it.
  */
 async function recordCalendarEventMapping(
   userId: string,
   taskId: string,
-  googleEventId: string
+  googleEventId: string,
+  mode: CalendarSyncMode = "personal"
 ): Promise<void> {
   const admin = createAdminClient();
-  const { error, data } = await admin.from("calendar_events").upsert(
+  const now = new Date().toISOString();
+  const { error } = await admin.from("calendar_events").upsert(
     {
       user_id: userId,
       task_id: taskId,
       google_event_id: googleEventId,
+      sync_mode: mode,
       last_error: null,
-      last_synced_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      last_synced_at: now,
+      updated_at: now,
     },
     { onConflict: "user_id,task_id" }
   );
-    if (error) console.error(`[gcal-sync] calendar_events upsert FAILED:`, error);
+  // Swallowed on purpose but LOUDLY: a missing mapping means the event
+  // exists in Google with nothing pointing at it, which is how "the sync
+  // said 0 but my calendar is empty" happens. It must never be silent.
+  if (error) {
+    console.error(
+      "[gcal-sync] calendar_events upsert FAILED",
+      { userId, taskId, googleEventId, mode, error: error.message }
+    );
+  }
 }
 
 /** Drop the mapping by Google event id, for the delete path. */
@@ -451,6 +481,14 @@ export interface GoogleConnectionStatus {
   calendarId: string | null;
   lastSyncedAt: string | null;
   syncedTaskCount: number;
+  /**
+   * Which task set this user's calendar is built from. The UI needs it to
+   * label the action honestly — "Sync assigned work" and "Sync my assigned
+   * tasks" describe genuinely different calendars.
+   */
+  syncMode: CalendarSyncMode;
+  /** Tasks the mode would currently select, synced or not. */
+  eligibleTaskCount: number;
 }
 
 /** Read-only status for the connect/disconnect UI. */
@@ -459,6 +497,7 @@ export async function getGoogleCalendarStatus(): Promise<
 > {
   try {
     const profile = await requireAuth();
+    const syncMode = calendarSyncModeForRole(profile.role);
 
     // google_connections is the source of truth for WHY the connection is in
     // its current state; user_google_tokens still holds the token material.
@@ -480,34 +519,39 @@ export async function getGoogleCalendarStatus(): Promise<
           calendarId: null,
           lastSyncedAt: null,
           syncedTaskCount: 0,
+          syncMode,
+          eligibleTaskCount: 0,
         },
       };
     }
 
-    // Count events in the authoritative calendar_events table (migration 024+).
-    // Fall back to the legacy google_event_id column on tasks if the table is
-    // empty or missing, so a fresh install or an un-migrated DB still shows a
-    // meaningful count instead of a silent zero.
+    // Count events in the authoritative calendar_events table (migration 024+),
+    // scoped to this user — the count is "events on MY calendar", which with
+    // two calendars per task is not the same as the task-global column.
     let syncedTaskCount = 0;
     const { count: calendarEventsCount, error: countError } = await createAdminClient()
       .from("calendar_events")
       .select("id", { count: "exact", head: true })
       .eq("user_id", profile.id);
-    if (!countError && typeof calendarEventsCount === "number" && calendarEventsCount > 0) {
+    if (!countError && typeof calendarEventsCount === "number") {
       syncedTaskCount = calendarEventsCount;
     } else {
       // Legacy fallback: count tasks that already have an event id stored.
+      // Personal mode only — in admin mode that column belongs to whoever
+      // wrote it last and is not evidence about this calendar.
       const { count: legacyCount } = await createAdminClient()
         .from("tasks")
         .select("id", { count: "exact", head: true })
         .eq("assigned_to", profile.id)
         .neq("google_event_id", null);
-      if (!legacyCount) {
-        // If even that failed (e.g. the column does not exist yet), stay at 0.
-      } else {
-        syncedTaskCount = legacyCount;
-      }
+      syncedTaskCount = legacyCount ?? 0;
     }
+
+    // How many tasks this user's mode would select right now, synced or not.
+    // Without it the UI cannot tell "0 synced because nothing matched" from
+    // "0 synced because nothing has been synced yet" — the two look
+    // identical from the page, which is how this bug stayed invisible.
+    const eligibleTaskCount = await countEligibleTasks(profile.id, syncMode);
 
     return {
       success: true,
@@ -520,6 +564,8 @@ export async function getGoogleCalendarStatus(): Promise<
         calendarId: row.calendar_id,
         lastSyncedAt: row.last_synced_at,
         syncedTaskCount,
+        syncMode,
+        eligibleTaskCount,
       },
     };
   } catch {
@@ -731,18 +777,189 @@ export async function disconnectGoogleCalendar(): Promise<ActionResponse> {
 // Outbound sync: task → calendar event
 // ──────────────────────────────────────────────
 
+/**
+ * Which set of tasks a user's calendar is built from.
+ *
+ * ONE engine, TWO selections. The event creation, update, token refresh and
+ * mapping code is identical either way; only the SELECT differs.
+ *
+ *   personal          the work assigned TO this user
+ *   admin_assignment  the work this user put in motion as staff
+ *
+ * The second mode exists because a SUPER_ADMIN assigns work and is almost
+ * never the assignee. Selecting only `assigned_to = adminId` for them loads
+ * nothing, creates nothing, and — because nothing failed — reports
+ * {created:0, updated:0, removed:0, errors:[]} forever. That indistinguishable
+ * "success" is the bug this mode fixes.
+ */
+export type CalendarSyncMode = "personal" | "admin_assignment";
+
+/**
+ * The strategy a given role's calendar is built from.
+ *
+ * Deliberately NOT exported: this module is `"use server"`, which only
+ * permits async exports, and nothing outside it needs this — the mode is
+ * always derived server-side from the authenticated role, never chosen
+ * by the caller.
+ */
+function calendarSyncModeForRole(role: UserRole | null | undefined): CalendarSyncMode {
+  return isSuperAdmin(role) ? "admin_assignment" : "personal";
+}
+
 export interface SyncResult {
+  /** Which selection strategy produced this run. */
+  mode: CalendarSyncMode;
+  /** Rows returned by the task query, before any eligibility filtering. */
+  rawTasksLoaded: number;
+  /** Tasks that will carry a calendar event. */
+  eligibleTasks: number;
+  skippedCompleted: number;
+  skippedMissingDeadline: number;
+  /** Anything else filtered out, so no task can vanish without a reason. */
+  skippedOther: number;
+  /** Already had an event id — these are PUT, not POSTed. */
+  alreadyMapped: number;
   created: number;
   updated: number;
   removed: number;
   unchanged: number;
   errors: string[];
+  /**
+   * The Google calendar the events were written to. Non-sensitive, and
+   * logged on every run: an event created into an unexpected calendar is
+   * otherwise invisible, which is the same class of bug as this one.
+   */
+  calendarId: string | null;
+}
+
+function emptyResult(mode: CalendarSyncMode, calendarId: string | null = null): SyncResult {
+  return {
+    mode,
+    rawTasksLoaded: 0,
+    eligibleTasks: 0,
+    skippedCompleted: 0,
+    skippedMissingDeadline: 0,
+    skippedOther: 0,
+    alreadyMapped: 0,
+    created: 0,
+    updated: 0,
+    removed: 0,
+    unchanged: 0,
+    errors: [],
+    calendarId,
+  };
+}
+
+/**
+ * Non-sensitive one-line summary of a run.
+ *
+ * Deliberately excludes access tokens, refresh tokens, client secrets,
+ * encryption keys and Authorization headers. Calendar id, task id and
+ * Google event id are included because they are what makes a failed run
+ * diagnosable from a log tail.
+ */
+function describeSyncResult(result: SyncResult): string {
+  return JSON.stringify({
+    mode: result.mode,
+    calendarId: result.calendarId,
+    rawTasksLoaded: result.rawTasksLoaded,
+    eligibleTasks: result.eligibleTasks,
+    skippedCompleted: result.skippedCompleted,
+    skippedMissingDeadline: result.skippedMissingDeadline,
+    skippedOther: result.skippedOther,
+    alreadyMapped: result.alreadyMapped,
+    created: result.created,
+    updated: result.updated,
+    removed: result.removed,
+    unchanged: result.unchanged,
+    errorCount: result.errors.length,
+  });
+}
+
+/**
+ * Resolve the sync mode for a user without a session.
+ *
+ * The Google webhook and the task-mutation path know only a user id, but
+ * the mode is a property of the user's ROLE. Reading it here keeps role
+ * logic out of the callers and means a server-side caller cannot hand a
+ * SUPER_ADMIN the personal task set by accident.
+ */
+async function calendarSyncModeForUserId(userId: string): Promise<CalendarSyncMode> {
+  const { data } = await createAdminClient()
+    .from("profiles")
+    .select("role")
+    .eq("id", userId)
+    .maybeSingle();
+  const role = (data as { role: UserRole } | null)?.role ?? null;
+  return calendarSyncModeForRole(role);
 }
 
 const TASK_SELECT = `id, title, description, status, priority, deadline, project_id,
-       google_event_id, project:projects(name, client:clients(name))`;
+       assigned_to, created_by, google_event_id,
+       project:projects(name, client:clients(name))`;
 
-/** Push one task to the caller's calendar and record the event id. */
+/**
+ * The one place a sync decides WHICH tasks it is responsible for.
+ *
+ * personal          assigned_to = userId
+ * admin_assignment  created_by  = userId
+ *
+ * created_by rather than a new assigned_by column: it already exists, every
+ * create path already writes it, and reassignment deliberately leaves it
+ * alone — which is the required behaviour, since the admin keeps the task on
+ * their calendar when it moves between employees.
+ *
+ * Both modes return tasks the user is already authorized to see in their own
+ * calendar. Nothing here reads another user's token.
+ */
+async function getTasksForCalendarSync(
+  userId: string,
+  mode: CalendarSyncMode
+): Promise<{ tasks: SyncableTask[]; error: unknown | null }> {
+  const admin = createAdminClient();
+  const query = admin
+    .from("tasks")
+    .select(TASK_SELECT)
+    .eq(mode === "admin_assignment" ? "created_by" : "assigned_to", userId);
+
+  const { data, error } = await query;
+  return { tasks: (data ?? []) as unknown as SyncableTask[], error };
+}
+
+/**
+ * How many tasks a mode would put on this user's calendar right now.
+ *
+ * Uses the same two eligibility rules as the sync itself (not completed,
+ * has a deadline), so the number the page shows and the number the sync
+ * acts on cannot drift apart.
+ *
+ * Counted in the database rather than by loading rows: this runs on every
+ * /calendar render, and the count does not need titles or descriptions.
+ */
+async function countEligibleTasks(
+  userId: string,
+  mode: CalendarSyncMode
+): Promise<number> {
+  const { count, error } = await createAdminClient()
+    .from("tasks")
+    .select("id", { count: "exact", head: true })
+    .eq(mode === "admin_assignment" ? "created_by" : "assigned_to", userId)
+    .neq("status", "COMPLETED")
+    .not("deadline", "is", null);
+  if (error) {
+    console.error("[gcal-sync] eligible task count failed", { userId, mode, error });
+    return 0;
+  }
+  return count ?? 0;
+}
+
+/**
+ * Push one task to the caller's calendar and record the event id.
+ *
+ * Uses the same mode rules as the full sync, so an admin asking for a task
+ * they assigned gets it, and an employee asking for someone else's task
+ * gets nothing — the ownership filter is applied here too.
+ */
 export async function syncTaskToCalendar(
   taskId: string
 ): Promise<ActionResponse<{ googleEventId: string }>> {
@@ -755,11 +972,13 @@ export async function syncTaskToCalendar(
       return { success: false, error: "Connect Google Calendar first" };
     }
 
+    const mode = calendarSyncModeForRole(profile.role);
+
     const { data, error } = await admin
       .from("tasks")
       .select(TASK_SELECT)
       .eq("id", taskId)
-      .eq("assigned_to", profile.id)
+      .eq(mode === "admin_assignment" ? "created_by" : "assigned_to", profile.id)
       .maybeSingle();
 
     if (error) {
@@ -775,23 +994,39 @@ export async function syncTaskToCalendar(
     const event = buildEventBody(task);
     const base = `${CALENDAR_API}/calendars/${encodeURIComponent(row.calendar_id)}/events`;
 
-    if (task.google_event_id) {
+    // This user's event for this task, not the task-global column.
+    const { data: mapping } = await admin
+      .from("calendar_events")
+      .select("google_event_id")
+      .eq("user_id", profile.id)
+      .eq("task_id", taskId)
+      .maybeSingle();
+    const existing =
+      (mapping as { google_event_id: string } | null)?.google_event_id ??
+      (mode === "personal" ? task.google_event_id : null);
+
+    if (existing) {
       await googleFetch(
-        `${base}/${encodeURIComponent(task.google_event_id)}`,
+        `${base}/${encodeURIComponent(existing)}`,
         accessToken,
         { method: "PUT", body: JSON.stringify(event) }
       );
-      await recordCalendarEventMapping(profile.id, taskId, task.google_event_id);
-      return { success: true, data: { googleEventId: task.google_event_id } };
+      await recordCalendarEventMapping(profile.id, taskId, existing, mode);
+      return { success: true, data: { googleEventId: existing } };
     }
 
-    const created = await googleFetch<{ id: string }>(base, accessToken, {
+    const created = await googleFetch<{ id?: string }>(base, accessToken, {
       method: "POST",
       body: JSON.stringify(event),
     });
+    if (!created?.id) {
+      return { success: false, error: "Google Calendar returned no event id" };
+    }
 
-    await admin.from("tasks").update({ google_event_id: created.id }).eq("id", taskId);
-    await recordCalendarEventMapping(profile.id, taskId, created.id);
+    await recordCalendarEventMapping(profile.id, taskId, created.id, mode);
+    if (mode === "personal") {
+      await admin.from("tasks").update({ google_event_id: created.id }).eq("id", taskId);
+    }
     return { success: true, data: { googleEventId: created.id } };
   } catch (err) {
     console.error("[google] syncTaskToCalendar", err);
@@ -803,24 +1038,29 @@ export async function syncTaskToCalendar(
 }
 
 /**
- * Full sync for the signed-in user: every assigned, non-completed task
- * gets an event. Completed tasks have their mapping cleared (the event
- * itself is left alone — the user may have edited it deliberately).
+ * "Sync now" — the full reconcile for the signed-in user.
+ *
+ * The mode is derived from the caller's ROLE, not chosen by the client:
+ * a SUPER_ADMIN's calendar is the work they assigned, an employee's is the
+ * work assigned to them. Letting the caller pick would let any user request
+ * another user's task set, which is why the role is read here.
  */
 export async function syncAllTasksToCalendar(): Promise<ActionResponse<SyncResult>> {
   // requireAuth is separated from the sync so a Google-side failure is
   // NOT reported as "Unauthorized" — the user is signed in fine, and
   // telling them otherwise sends them to the login page for no reason.
   let userId: string;
+  let mode: CalendarSyncMode;
   try {
     const profile = await requireAuth();
     userId = profile.id;
+    mode = calendarSyncModeForRole(profile.role);
   } catch {
     return { success: false, error: "Unauthorized" };
   }
 
   try {
-    return await fullSyncForUser(userId);
+    return await fullSyncForUser(userId, mode);
   } catch (err) {
     if (err instanceof GoogleAuthRevokedError) {
       return { success: false, error: err.message };
@@ -833,8 +1073,16 @@ export async function syncAllTasksToCalendar(): Promise<ActionResponse<SyncResul
   }
 }
 
-/** The per-user full sync, shared with the incremental path. */
-async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResult>> {
+/**
+ * The per-user full sync, shared with the incremental path.
+ *
+ * ONE engine. `mode` selects the task set; everything after that — token
+ * refresh, event body, PUT/POST, mapping write — is identical for both modes.
+ */
+async function fullSyncForUser(
+  userId: string,
+  mode: CalendarSyncMode
+): Promise<ActionResponse<SyncResult>> {
   const admin = createAdminClient();
 
   const { data: rawRow } = await admin
@@ -847,6 +1095,11 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
   if (!row) {
     return { success: false, error: "Connect Google Calendar first" };
   }
+
+  // The calendar this user's events are written to. Logged on every run so
+  // an event landing somewhere unexpected is visible rather than inferred.
+  const calendarId = row.calendar_id;
+  console.log("[gcal-sync] run", { userId, mode, calendarId });
 
   // Returning rather than throwing: this function is called from three
   // places, two of which sit outside any try block (the no-cursor path
@@ -866,7 +1119,7 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
     };
   }
 
-  const base = `${CALENDAR_API}/calendars/${encodeURIComponent(row.calendar_id)}/events`;
+  const base = `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`;
 
   // Prime a fresh cursor so the next incremental sync has a baseline.
   let nextSyncToken: string | undefined;
@@ -880,96 +1133,165 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
     console.error("[google] initial cursor fetch", err);
   }
 
-  const { data: rawTasks, error } = await admin
-    .from("tasks")
-    .select(TASK_SELECT)
-    .eq("assigned_to", userId);
-
+  const { tasks, error } = await getTasksForCalendarSync(userId, mode);
   if (error) {
-    console.error("[gcal-sync] FAILED to load tasks:", error);
+    console.error("[gcal-sync] FAILED to load tasks", { userId, mode, error });
     return { success: false, error: "Couldn't load your tasks" };
   }
 
-  
-  const result: SyncResult = {
-    created: 0,
-    updated: 0,
-    removed: 0,
-    unchanged: 0,
-    errors: [],
-  };
+  const result = emptyResult(mode, calendarId);
+  result.rawTasksLoaded = tasks.length;
 
-  for (const task of (rawTasks ?? []) as unknown as SyncableTask[]) {
-    
+  /**
+   * The event id for a task in THIS user's calendar.
+   *
+   * Read from calendar_events, NOT from tasks.google_event_id. That column
+   * is global to the task: once the same task is on both an admin's and an
+   * employee's calendar, the column holds whichever wrote last, and using it
+   * here would make one user PUT (or DELETE) another user's event.
+   */
+  async function mappedEventId(task: SyncableTask): Promise<string | null> {
+    const { data } = await admin
+      .from("calendar_events")
+      .select("google_event_id")
+      .eq("user_id", userId)
+      .eq("task_id", task.id)
+      .maybeSingle();
+    const fromMapping = (data as { google_event_id: string } | null)?.google_event_id;
+    if (fromMapping) return fromMapping;
+
+    // Legacy fallback for rows predating the mapping write. Only trusted in
+    // personal mode: in admin mode an unbackfilled tasks.google_event_id
+    // could belong to a different user, and deleting it would take their
+    // event off their calendar.
+    return mode === "personal" ? task.google_event_id : null;
+  }
+
+  /** Drop the mapping for this user only. Never touches another user. */
+  async function forgetMapping(task: SyncableTask): Promise<void> {
+    await admin
+      .from("calendar_events")
+      .delete()
+      .eq("user_id", userId)
+      .eq("task_id", task.id);
+    if (mode === "personal") {
+      await admin.from("tasks").update({ google_event_id: null }).eq("id", task.id);
+    }
+  }
+
+  for (const task of tasks) {
+    // Completed work leaves the calendar. Removing this user's event only —
+    // the task itself is untouched, so every other user's copy survives.
     if (task.status === "COMPLETED") {
-            if (task.google_event_id) {
-        const del = await admin.from("tasks").update({ google_event_id: null }).eq("id", task.id);
-                result.removed += 1;
+      result.skippedCompleted += 1;
+      const existing = await mappedEventId(task);
+      if (existing) {
+        await deleteEvent(row, existing, accessToken);
+        await forgetMapping(task);
+        result.removed += 1;
+        console.log("[gcal-sync] removed completed task event", {
+          taskId: task.id,
+          googleEventId: existing,
+          calendarId,
+          mode,
+        });
       }
       continue;
     }
 
     if (!task.deadline) {
-            continue;
+      result.skippedMissingDeadline += 1;
+      continue;
     }
 
-    console.debug(
-      "[google] syncing task",
-      task.id,
-      task.title,
-      "deadline:",
-      task.deadline ?? "none",
-      "hasEventId:",
-      !!task.google_event_id
-    );
+    result.eligibleTasks += 1;
 
     try {
-      if (task.google_event_id) {
+      const body = buildEventBody(task);
+      const existing = await mappedEventId(task);
+
+      if (existing) {
+        result.alreadyMapped += 1;
         await googleFetch(
-          `${base}/${encodeURIComponent(task.google_event_id)}`,
+          `${base}/${encodeURIComponent(existing)}`,
           accessToken,
-          { method: "PUT", body: JSON.stringify(buildEventBody(task)) }
+          { method: "PUT", body: JSON.stringify(body) }
         );
+        await recordCalendarEventMapping(userId, task.id, existing, mode);
         result.updated += 1;
-        console.debug("[google] updated event for task", task.id);
-      } else {
-        const created = await googleFetch<{ id: string }>(base, accessToken, {
-          method: "POST",
-          body: JSON.stringify(buildEventBody(task)),
+        console.log("[gcal-sync] updated event", {
+          taskId: task.id,
+          googleEventId: existing,
+          calendarId,
+          mode,
+          start: (body.start as { date?: string; dateTime?: string })?.date ??
+            (body.start as { dateTime?: string })?.dateTime,
+          end: (body.end as { date?: string; dateTime?: string })?.date ??
+            (body.end as { dateTime?: string })?.dateTime,
         });
-        if (!created.id) {
-          throw new Error("Google Calendar API returned no event id");
+      } else {
+        // A 2xx with no id is a failure, not a success with a blank id:
+        // without a returned id there is nothing to address on the next run.
+        const created = await googleFetch<{ id?: string }>(base, accessToken, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        if (!created?.id) {
+          throw new Error("Google Calendar returned success without an event id");
         }
-        const tUpd = await admin
-          .from("tasks")
-          .update({ google_event_id: created.id })
-          .eq("id", task.id);
-        
-        await recordCalendarEventMapping(userId, task.id, created.id);
+        await recordCalendarEventMapping(userId, task.id, created.id, mode);
+        // Legacy column, personal mode only — see mappedEventId.
+        if (mode === "personal") {
+          await admin.from("tasks").update({ google_event_id: created.id }).eq("id", task.id);
+        }
         result.created += 1;
-              }
+        console.log("[gcal-sync] created event", {
+          taskId: task.id,
+          googleEventId: created.id,
+          calendarId,
+          mode,
+          allDay: !!(body.start as { date?: string })?.date,
+          start: (body.start as { date?: string; dateTime?: string })?.date ??
+            (body.start as { dateTime?: string })?.dateTime,
+          end: (body.end as { date?: string; dateTime?: string })?.date ??
+            (body.end as { dateTime?: string })?.dateTime,
+        });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown error";
       result.errors.push(`${task.id}: ${msg}`);
-      console.error("[google] sync task failed", task.id, task.title, msg);
+      console.error("[gcal-sync] task sync failed", {
+        taskId: task.id,
+        title: task.title,
+        calendarId,
+        mode,
+        error: msg,
+      });
     }
   }
 
-  const totalChanges = result.created + result.updated + result.removed;
-  
-  if (result.errors.length === 0 || totalChanges > 0) {
-    const syn = await admin
+  // Only stamp a successful run. With errors, the timestamp would claim a
+  // clean sync that never happened — which is how a broken calendar keeps
+  // looking healthy.
+  if (result.errors.length === 0) {
+    const { error: syncError } = await admin
       .from("user_google_tokens")
       .update({
         last_synced_at: new Date().toISOString(),
         ...(nextSyncToken ? { sync_token: nextSyncToken } : {}),
       })
       .eq("id", row.id);
-      } else {
-    console.error(`[gcal-sync] sync had errors, NOT updating last_synced_at. Errors:`, result.errors);
+    if (syncError) {
+      console.error("[gcal-sync] could not record last_synced_at", syncError.message);
+    }
+  } else {
+    console.error(
+      "[gcal-sync] run had errors, NOT updating last_synced_at",
+      { userId, mode, errors: result.errors }
+    );
   }
 
-  console.log(`[gcal-sync] fullSyncForUser returning:`, JSON.stringify(result));
+  console.log(`[gcal-sync] fullSyncForUser result ${describeSyncResult(result)}`);
   return { success: true, data: result };
 }
 
@@ -1032,18 +1354,15 @@ export async function incrementalSyncForUser(
     .maybeSingle();
   const row = rawRow as GoogleTokenRow | null;
 
-  const empty: SyncResult = {
-    created: 0,
-    updated: 0,
-    removed: 0,
-    unchanged: 0,
-    errors: [],
-  };
-  if (!row) return { success: true, data: empty };
+  // Resolved from the user's own profile, so the webhook (which has no
+  // session) still selects the right task set for whoever it is syncing.
+  const mode = await calendarSyncModeForUserId(userId);
+
+  if (!row) return { success: true, data: emptyResult(mode) };
 
   // No cursor yet -> nothing to diff against, so start from a full sync.
   if (!row.sync_token) {
-    return fullSyncForUser(userId);
+    return fullSyncForUser(userId, mode);
   }
 
   // Minting the token sits OUTSIDE the try below, so it needs its own
@@ -1063,7 +1382,8 @@ export async function incrementalSyncForUser(
     };
   }
 
-  const result: SyncResult = { ...empty, errors: [] };
+  const result = emptyResult(mode, row.calendar_id);
+  result.rawTasksLoaded = 0;
 
   try {
     let page = await fetchChangePage(row, accessToken, row.sync_token);
@@ -1083,11 +1403,24 @@ export async function incrementalSyncForUser(
     }
 
     if (deletedTaskIds.length > 0) {
-      await admin
-        .from("tasks")
-        .update({ google_event_id: null })
-        .in("id", deletedTaskIds)
-        .eq("assigned_to", userId);
+      // Clear THIS user's mapping only. The task may still be live in an
+      // admin's calendar, and blanking the task-global column (or the
+      // mapping) for anyone else would orphan that copy — or make the next
+      // sync address the wrong user's event.
+      for (const taskId of deletedTaskIds) {
+        await admin
+          .from("calendar_events")
+          .delete()
+          .eq("user_id", userId)
+          .eq("task_id", taskId);
+      }
+      if (mode === "personal") {
+        await admin
+          .from("tasks")
+          .update({ google_event_id: null })
+          .in("id", deletedTaskIds)
+          .eq("assigned_to", userId);
+      }
       result.removed = deletedTaskIds.length;
     }
 
@@ -1109,7 +1442,7 @@ export async function incrementalSyncForUser(
       // documented recovery is to drop the cursor and re-sync in full.
       console.warn("[google] syncToken 410 — falling back to full sync", userId);
       await admin.from("user_google_tokens").update({ sync_token: null }).eq("id", row.id);
-      return fullSyncForUser(userId);
+      return fullSyncForUser(userId, mode);
     }
     console.error("[google] incrementalSyncForUser", err);
     return {
@@ -1229,12 +1562,16 @@ export async function setupWatchChannel(): Promise<
 // ──────────────────────────────────────────────
 
 /**
- * Sync one assignee's Google Calendar after a task changed.
+ * Sync one user's Google Calendar after a task changed.
  *
  * @param assigneeId the task's current assignee, or null/undefined when
  *   the task has no assignee (nothing to sync).
  * @param taskId when given, only that task is synced; otherwise the
- *   assignee's whole calendar is reconciled.
+ *   user's whole calendar is reconciled.
+ * @param actorId the staff member who made the change. When they are a
+ *   SUPER_ADMIN their own calendar is reconciled too, because the admin's
+ *   calendar is the work they assigned — without this an admin's calendar
+ *   would only ever catch up on the next manual sync.
  *
  * A 404/410 from Google means the event or the token is gone; both are
  * expected in normal operation (the user deleted the event, or revoked
@@ -1242,7 +1579,8 @@ export async function setupWatchChannel(): Promise<
  */
 export async function syncAssigneeCalendar(
   assigneeId: string | null | undefined,
-  taskId?: string
+  taskId?: string,
+  actorId?: string
 ): Promise<void> {
   if (!assigneeId) return;
   try {
@@ -1252,10 +1590,30 @@ export async function syncAssigneeCalendar(
     if (!row) return;
 
     if (taskId) {
-      await syncSingleTaskForUser(assigneeId, row, taskId);
-      return;
+      await syncSingleTaskForUser(
+        assigneeId,
+        row,
+        taskId,
+        await calendarSyncModeForUserId(assigneeId)
+      );
+    } else {
+      await fullSyncForUser(assigneeId, await calendarSyncModeForUserId(assigneeId));
     }
-    await fullSyncForUser(assigneeId);
+
+    // The actor's own calendar. Only when they are not already the person
+    // we just synced, so a self-assignment does not reconcile twice.
+    if (actorId && actorId !== assigneeId) {
+      const actorRow = await loadTokenRow(actorId);
+      if (!actorRow) return;
+      const actorMode = await calendarSyncModeForUserId(actorId);
+      if (actorMode === "admin_assignment") {
+        if (taskId) {
+          await syncSingleTaskForUser(actorId, actorRow, taskId, actorMode);
+        } else {
+          await fullSyncForUser(actorId, actorMode);
+        }
+      }
+    }
   } catch (err) {
     console.error(
       "[google] syncAssigneeCalendar failed",
@@ -1269,23 +1627,32 @@ export async function syncAssigneeCalendar(
 /**
  * Create, update, or remove ONE task's event for ONE user.
  *
- * The three outcomes, all keyed off task status and google_event_id:
+ * The outcomes are keyed off task status and THIS user's mapping:
  *   COMPLETED + has event  → delete the event (keep the calendar clean)
  *   COMPLETED + no event   → nothing to do
  *   open + has event       → update in place
  *   open + no event        → insert
+ *
+ * The ownership filter is the mode's own: assigned_to for a personal
+ * calendar, created_by for an admin's. Using assigned_to for both would
+ * silently skip every task an admin assigned to somebody else — the same
+ * class of bug as the full sync this now shares its mode with.
+ *
+ * Every delete here is scoped by user_id in calendar_events, so removing
+ * one user's event can never touch another's copy of the same task.
  */
 async function syncSingleTaskForUser(
   userId: string,
   row: GoogleTokenRow,
-  taskId: string
+  taskId: string,
+  mode: CalendarSyncMode
 ): Promise<void> {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from("tasks")
     .select(TASK_SELECT)
     .eq("id", taskId)
-    .eq("assigned_to", userId)
+    .eq(mode === "admin_assignment" ? "created_by" : "assigned_to", userId)
     .maybeSingle();
 
   if (error) {
@@ -1295,9 +1662,9 @@ async function syncSingleTaskForUser(
 
   const task = data as unknown as SyncableTask | null;
 
-  // No row: either the task was deleted, or it is no longer assigned to
-  // this user (reassigned away). Both are handled by the caller's
-  // separate full-sync for the previous assignee.
+  // No row: the task was deleted, or it is no longer in this user's scope
+  // (reassigned away). Both are handled by the caller's full-sync for the
+  // previous owner.
   if (!task) return;
 
   // Guarded locally rather than relying on the caller. syncAssigneeCalendar
@@ -1312,29 +1679,43 @@ async function syncSingleTaskForUser(
   }
   const base = `${CALENDAR_API}/calendars/${encodeURIComponent(row.calendar_id)}/events`;
 
-  // Completed work leaves the calendar.
+  // This user's event id for this task. Read from the per-user mapping, not
+  // from tasks.google_event_id, which is global to the task and would point
+  // at a different user's event once the task lives in two calendars.
+  const { data: mapping } = await admin
+    .from("calendar_events")
+    .select("google_event_id")
+    .eq("user_id", userId)
+    .eq("task_id", task.id)
+    .maybeSingle();
+  const existing =
+    (mapping as { google_event_id: string } | null)?.google_event_id ??
+    (mode === "personal" ? task.google_event_id : null);
+
+  // Completed work leaves the calendar — this user's copy only.
   if (task.status === "COMPLETED") {
-    if (!task.google_event_id) return;
-    await deleteEvent(row, task.google_event_id, accessToken);
-    await admin.from("tasks").update({ google_event_id: null }).eq("id", task.id);
+    if (!existing) return;
+    await deleteEvent(row, existing, accessToken);
+    await forgetMappingForUser(admin, userId, task.id, mode);
     return;
   }
 
   const event = buildEventBody(task);
 
-  if (task.google_event_id) {
+  if (existing) {
     try {
       await googleFetch(
-        `${base}/${encodeURIComponent(task.google_event_id)}?sendUpdates=none`,
+        `${base}/${encodeURIComponent(existing)}?sendUpdates=none`,
         accessToken,
         { method: "PUT", body: JSON.stringify(event) }
       );
+      await recordCalendarEventMapping(userId, task.id, existing, mode);
     } catch (err) {
       // A stale id (event deleted in Google) leaves us unable to update.
       // Fall back to an insert so the event is not simply lost.
       if (isGoogleGone(err)) {
-        await admin.from("tasks").update({ google_event_id: null }).eq("id", task.id);
-        await insertEvent(row, task.id, event, accessToken, base, admin);
+        await forgetMappingForUser(admin, userId, task.id, mode);
+        await insertEvent(userId, row, task.id, event, accessToken, base, admin, mode);
         return;
       }
       throw err;
@@ -1342,17 +1723,37 @@ async function syncSingleTaskForUser(
     return;
   }
 
-  await insertEvent(row, task.id, event, accessToken, base, admin);
+  await insertEvent(userId, row, task.id, event, accessToken, base, admin, mode);
 }
 
-/** Insert a new event and record its id on the task. */
+/** Drop one user's mapping for a task, and the legacy column in personal mode. */
+async function forgetMappingForUser(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string,
+  taskId: string,
+  mode: CalendarSyncMode
+): Promise<void> {
+  const { error } = await admin
+    .from("calendar_events")
+    .delete()
+    .eq("user_id", userId)
+    .eq("task_id", taskId);
+  if (error) console.error("[google] calendar_events delete failed", error.message);
+  if (mode === "personal") {
+    await admin.from("tasks").update({ google_event_id: null }).eq("id", taskId);
+  }
+}
+
+/** Insert a new event and record it against THIS user only. */
 async function insertEvent(
+  userId: string,
   row: GoogleTokenRow,
   taskId: string,
   event: Record<string, unknown>,
   accessToken: string,
   base: string,
-  admin: ReturnType<typeof createAdminClient>
+  admin: ReturnType<typeof createAdminClient>,
+  mode: CalendarSyncMode
 ): Promise<void> {
   try {
     const created = await googleFetch<{ id?: string }>(
@@ -1360,7 +1761,14 @@ async function insertEvent(
       accessToken,
       { method: "POST", body: JSON.stringify(event) }
     );
-    if (created.id) {
+    // 2xx with no id is a failure: there is nothing to address next time.
+    if (!created?.id) {
+      console.error("[google] insert returned no event id", { userId, taskId, mode });
+      return;
+    }
+    await recordCalendarEventMapping(userId, taskId, created.id, mode);
+    // Legacy column, personal mode only — see mappedEventId in fullSyncForUser.
+    if (mode === "personal") {
       await admin.from("tasks").update({ google_event_id: created.id }).eq("id", taskId);
     }
   } catch (err) {
@@ -1396,17 +1804,75 @@ async function deleteEvent(
 }
 
 /**
- * Remove one known event from one user's calendar.
+ * Remove a task's events from EVERY calendar that holds one.
  *
- * Exported for the task-delete path, which reads google_event_id while
- * the row still exists and must delete the event before the row goes —
- * after that the id can no longer be found.
+ * The task-delete path. Because a task can now live in more than one
+ * user's calendar (the admin who assigned it and the employee doing it),
+ * deleting only the assignee's copy would strand an event on the admin's
+ * calendar forever — nothing would ever point at it again, because
+ * calendar_events rows cascade away with the task.
+ *
+ * Each user's calendar is written using THAT user's own token. Nobody's
+ * grant is used to delete from anybody else's calendar.
  *
  * Never throws: the task is already deleted (or about to be), and a
- * leftover event is a cosmetic problem the cron can reconcile, whereas a
- * thrown error here would make a successful delete look like a failure.
+ * leftover event is a cosmetic problem a later sync can reconcile, whereas
+ * a thrown error here would make a successful delete look like a failure.
  */
-export async function removeCalendarEvent(
+export async function removeCalendarEventsForTask(
+  taskId: string,
+  /** Used only if the mapping table has no row for this task. */
+  fallbackUserId: string | null | undefined,
+  fallbackEventId: string | null | undefined
+): Promise<void> {
+  const admin = createAdminClient();
+  try {
+    const { data } = await admin
+      .from("calendar_events")
+      .select("user_id, google_event_id")
+      .eq("task_id", taskId);
+    const rows = (data ?? []) as unknown as Array<{
+      user_id: string;
+      google_event_id: string;
+    }>;
+
+    // No mapping (pre-024 row, or the write failed): fall back to the
+    // legacy column so the assignee's event is still cleaned up.
+    if (rows.length === 0) {
+      if (fallbackUserId && fallbackEventId) {
+        await removeCalendarEvent(fallbackUserId, fallbackEventId);
+      }
+      return;
+    }
+
+    for (const mapping of rows) {
+      try {
+        await removeCalendarEvent(mapping.user_id, mapping.google_event_id);
+      } catch (err) {
+        // One user's calendar failing must not strand the others'.
+        console.error(
+          "[google] could not remove task event for one user",
+          { taskId, userId: mapping.user_id },
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      "[google] removeCalendarEventsForTask failed",
+      taskId,
+      err instanceof Error ? err.message : err
+    );
+  }
+}
+
+/**
+ * Remove one known event from one user's calendar.
+ *
+ * Never throws. Scoped by user_id throughout, so this can never take an
+ * event off a different user's calendar.
+ */
+async function removeCalendarEvent(
   userId: string | null | undefined,
   googleEventId: string
 ): Promise<void> {

@@ -92,22 +92,51 @@ export function CalendarView() {
     // it would keep showing "connected" and hide the dashboard banner
     // that would otherwise prompt a reconnect.
     void queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
-    if (res.success && res.data) {
-      const { created, updated, removed, errors } = res.data;
-      if (errors.length > 0) {
-        toast.error(
-          `Sync completed with ${errors.length} error${errors.length === 1 ? "" : "s"}: ${errors[0]}`
-        );
-      } else if (created + updated + removed === 0) {
-        toast.success("Calendar is already up to date");
-      } else {
-        toast.success(
-          `Calendar up to date — ${created} added, ${updated} updated, ${removed} removed`
-        );
-      }
-    } else {
-      toast.error(res.error ?? "Sync failed");
+
+    if (!res.success || !res.data) {
+      // An expired grant is a reconnect, not a generic failure. Saying
+      // "Sync failed" would send the user looking for a bug in their
+      // tasks instead of at the grant they revoked.
+      if (res.success) toast.error("Calendar sync returned no result");
+      else toast.error(res.error ?? "Sync failed");
+      return;
     }
+
+    const r = res.data;
+    const noun = r.mode === "admin_assignment" ? "assigned tasks" : "tasks";
+
+    if (r.errors.length > 0) {
+      toast.error(
+        `${r.errors.length} ${r.errors.length === 1 ? "task" : "tasks"} could not be synchronized — ${r.errors[0]}`
+      );
+      return;
+    }
+
+    if (r.eligibleTasks === 0) {
+      // Never "already up to date" here. Zero eligible tasks means nothing
+      // matched this calendar, which is a different fact from "nothing
+      // changed" and was the whole reason this bug read as success.
+      toast.info(
+        `No eligible ${noun} were found for this calendar${
+          r.rawTasksLoaded > 0 ? ` — ${r.rawTasksLoaded} task${r.rawTasksLoaded === 1 ? "" : "s"} checked, all completed or without a deadline` : ""
+        }`
+      );
+      return;
+    }
+
+    const changes = r.created + r.updated + r.removed;
+    if (changes === 0) {
+      toast.success(
+        `Calendar is already up to date — ${r.eligibleTasks} ${r.eligibleTasks === 1 ? "task" : "tasks"} checked`
+      );
+      return;
+    }
+
+    toast.success(
+      `${r.created} ${r.created === 1 ? "task" : "tasks"} added to Google Calendar` +
+        (r.updated ? `, ${r.updated} updated` : "") +
+        (r.removed ? `, ${r.removed} removed` : "")
+    );
   }
 
   async function handleDisconnect() {
@@ -162,6 +191,12 @@ export function CalendarView() {
                         {data?.lastSyncedAt
                           ? ` · last synced ${formatRelativeTime(data.lastSyncedAt)}`
                           : " · never synced"}
+                        {data?.eligibleTaskCount ? (
+                          <>
+                            {" · "}
+                            {data.eligibleTaskCount} eligible
+                          </>
+                        ) : null}
                       </p>
                     </div>
                   </div>
@@ -178,7 +213,9 @@ export function CalendarView() {
                       ) : (
                         <RefreshCw className="size-3.5" />
                       )}
-                      Sync now
+                      {data?.syncMode === "admin_assignment"
+                        ? "Sync assigned work"
+                        : "Sync my assigned tasks"}
                     </Button>
                     <Button
                       type="button"
@@ -197,8 +234,9 @@ export function CalendarView() {
                   </div>
                 </div>
                 <p className="mt-3 text-[13px] text-muted-foreground">
-                  Tasks sync automatically when they&apos;re assigned, edited, or
-                  completed. Sync now only re-checks for drift.
+                  {data?.syncMode === "admin_assignment"
+                    ? "Work you assign syncs to your calendar automatically, as it is assigned, edited, or completed. This button only re-checks for drift."
+                    : "Tasks sync automatically when they're assigned, edited, or completed. This button only re-checks for drift."}
                 </p>
               </div>
             ) : (
