@@ -335,7 +335,6 @@ function DeadlinePreview() {
       {total > 0 ? (
         <ul className="divide-y border-t pt-1">
           {[...byDay.entries()]
-            .filter(([date]) => date >= todayKey)
             .sort(([a], [b]) => a.localeCompare(b))
             .slice(0, 4)
             .flatMap(([date, list]) =>

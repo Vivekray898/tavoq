@@ -162,8 +162,11 @@ const runtimeCaching = [
   // HTML documents are handled by the first entry above, which never stores a
   // document in a cache — it only reads the precached /offline page.
   // Anything unlisted — including cross-origin. Default deny.
+  // Exclude cross-origin requests so third-party beacons (e.g. Cloudflare
+  // analytics) pass through to the browser instead of being rejected by the
+  // service worker's NetworkOnly handler.
   {
-    matcher: () => true,
+    matcher: ({ url }: { url: URL }) => url.origin === self.location.origin,
     handler: new NetworkOnly(),
   },
 ];

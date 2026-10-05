@@ -89,7 +89,6 @@ export function PwaBootstrap() {
   // ── Install prompt (§40): only if not previously dismissed ─────────────
   useEffect(() => {
     function onBeforeInstall(e: Event) {
-      e.preventDefault();
       const dismissedAt = localStorage.getItem(DISMISS_KEY);
       if (
         dismissedAt &&
@@ -97,6 +96,10 @@ export function PwaBootstrap() {
       ) {
         return;
       }
+      // Only preventDefault when we will actually show the prompt.
+      // Calling it unconditionally triggers the console warning when the user
+      // has already dismissed and we skip showing anything.
+      e.preventDefault();
       setInstallEvent(e as BeforeInstallPromptEvent);
       // Small delay so it never fights with first-load UI
       setTimeout(() => setShowPrompt(true), 3000);

@@ -279,7 +279,8 @@ describe("runtime caching never stores authenticated responses", () => {
     // fallback would never run. This ordering is load-bearing.
     const src = sw();
     const doc = src.indexOf("NetworkFirstWithOfflineFallback()");
-    const catchAll = src.lastIndexOf("matcher: () => true");
+    // The catch-all now scopes to same-origin only.
+    const catchAll = src.lastIndexOf("url.origin === self.location.origin");
     assert.notEqual(doc, -1);
     assert.notEqual(catchAll, -1);
     assert.ok(doc < catchAll, "the document route must be registered first");
@@ -287,7 +288,12 @@ describe("runtime caching never stores authenticated responses", () => {
 
   test("ends with a catch-all NetworkOnly so nothing unlisted is ever cached", () => {
     const entries = runtimeCachingEntries(sw());
-    const catchAll = entries.find((e) => /matcher:\s*\(\)\s*=>\s*true/.test(e));
+    // The catch-all now scopes to same-origin only, letting cross-origin
+    // requests (e.g. Cloudflare analytics beacons) pass through to the
+    // browser instead of being rejected by NetworkOnly.
+    const catchAll = entries.find((e) =>
+      /matcher:\s*\(\{\s*url\s*\}:\s*\{\s*url:\s*URL\s*\}\)\s*=>\s*url\.origin/.test(e)
+    );
     assert.ok(catchAll, "needs a catch-all entry");
     assert.match(catchAll, /NetworkOnly/, "the catch-all must be network only");
     // And it must be the final entry, so nothing is evaluated after it.

@@ -487,10 +487,30 @@ export async function getGoogleCalendarStatus(): Promise<
       };
     }
 
-    const { count } = await createAdminClient()
+    // Count events in the authoritative calendar_events table (migration 024+).
+    // Fall back to the legacy google_event_id column on tasks if the table is
+    // empty or missing, so a fresh install or an un-migrated DB still shows a
+    // meaningful count instead of a silent zero.
+    let syncedTaskCount = 0;
+    const { count: calendarEventsCount, error: countError } = await createAdminClient()
       .from("calendar_events")
       .select("id", { count: "exact", head: true })
       .eq("user_id", profile.id);
+    if (!countError && typeof calendarEventsCount === "number" && calendarEventsCount > 0) {
+      syncedTaskCount = calendarEventsCount;
+    } else {
+      // Legacy fallback: count tasks that already have an event id stored.
+      const { count: legacyCount } = await createAdminClient()
+        .from("tasks")
+        .select("id", { count: "exact", head: true })
+        .eq("assigned_to", profile.id)
+        .neq("google_event_id", null);
+      if (!legacyCount) {
+        // If even that failed (e.g. the column does not exist yet), stay at 0.
+      } else {
+        syncedTaskCount = legacyCount;
+      }
+    }
 
     return {
       success: true,
@@ -502,9 +522,7 @@ export async function getGoogleCalendarStatus(): Promise<
         googleEmail: row.google_email,
         calendarId: row.calendar_id,
         lastSyncedAt: row.last_synced_at,
-        // Fall back to the legacy column if migration 024 has not been applied
-        // yet, so the count never silently reads as zero.
-        syncedTaskCount: count ?? 0,
+        syncedTaskCount,
       },
     };
   } catch {
@@ -892,6 +910,16 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
       continue;
     }
 
+    console.debug(
+      "[google] syncing task",
+      task.id,
+      task.title,
+      "deadline:",
+      task.deadline ?? "none",
+      "hasEventId:",
+      !!task.google_event_id
+    );
+
     try {
       if (task.google_event_id) {
         await googleFetch(
@@ -900,31 +928,49 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
           { method: "PUT", body: JSON.stringify(buildEventBody(task)) }
         );
         result.updated += 1;
+        console.debug("[google] updated event for task", task.id);
       } else {
         const created = await googleFetch<{ id: string }>(base, accessToken, {
           method: "POST",
           body: JSON.stringify(buildEventBody(task)),
         });
+        if (!created.id) {
+          throw new Error("Google Calendar API returned no event id");
+        }
         await admin
           .from("tasks")
           .update({ google_event_id: created.id })
           .eq("id", task.id);
+        await recordCalendarEventMapping(userId, task.id, created.id);
         result.created += 1;
+        console.debug("[google] created event", created.id, "for task", task.id);
       }
     } catch (err) {
-      result.errors.push(
-        `${task.id}: ${err instanceof Error ? err.message : "unknown error"}`
-      );
+      const msg = err instanceof Error ? err.message : "unknown error";
+      result.errors.push(`${task.id}: ${msg}`);
+      console.error("[google] sync task failed", task.id, task.title, msg);
     }
   }
 
-  await admin
-    .from("user_google_tokens")
-    .update({
-      last_synced_at: new Date().toISOString(),
-      ...(nextSyncToken ? { sync_token: nextSyncToken } : {}),
-    })
-    .eq("id", row.id);
+  // Only mark the sync as complete when something actually happened or the
+  // task list is empty. A sync that collected errors did not succeed, and
+  // stamping last_synced_at would hide the failure from the UI.
+  const totalChanges = result.created + result.updated + result.removed;
+  if (result.errors.length === 0 || totalChanges > 0) {
+    await admin
+      .from("user_google_tokens")
+      .update({
+        last_synced_at: new Date().toISOString(),
+        ...(nextSyncToken ? { sync_token: nextSyncToken } : {}),
+      })
+      .eq("id", row.id);
+  } else {
+    console.warn(
+      "[google] fullSyncForUser: sync had errors, not updating last_synced_at",
+      userId,
+      result.errors
+    );
+  }
 
   return { success: true, data: result };
 }
