@@ -172,15 +172,13 @@ async function getAccessToken(row: GoogleTokenRow): Promise<TokenBundle> {
     new Date(row.access_token_expires_at).getTime() > Date.now() + 60_000;
 
   if (cachedValid) {
-    console.log("[gcal-sync] getAccessToken: using cached token");
-    return {
+        return {
       accessToken: row.access_token as string,
       refreshToken: null,
       expiresAt: new Date(row.access_token_expires_at as string).getTime(),
     };
   }
-  console.log("[gcal-sync] getAccessToken: refreshing token...");
-
+  
   const refreshToken = decryptToken(row.refresh_token);
   const json = await postToken({
     grant_type: "refresh_token",
@@ -188,7 +186,6 @@ async function getAccessToken(row: GoogleTokenRow): Promise<TokenBundle> {
     client_id: requireEnv("GOOGLE_CLIENT_ID"),
     client_secret: requireEnv("GOOGLE_CLIENT_SECRET"),
   });
-
 
   if (!json.access_token) {
     // A dead grant must not be retried forever, but it must not be erased
@@ -266,8 +263,7 @@ function sleep(ms: number): Promise<void> {
 async function googleFetch<T>(url: string, accessToken: string, init?: RequestInit): Promise<T> {
   let lastError: unknown;
   const method = init?.method ?? "GET";
-  console.log(`[gcal-sync] googleFetch: ${method} ${url.substring(0, 120)}`);
-
+  
   for (let attempt = 0; attempt < MAX_API_ATTEMPTS; attempt += 1) {
     try {
       const res = await fetch(url, {
@@ -295,8 +291,7 @@ async function googleFetch<T>(url: string, accessToken: string, init?: RequestIn
       }
 
       const json = await res.json();
-      console.log(`[gcal-sync] googleFetch: OK keys=${Object.keys(json).join(", ")}`);
-      return json as T;
+            return json as T;
     } catch (err) {
       // A gone sync token is a permanent, meaningful signal — never retry it.
       if (err instanceof SyncTokenGoneError) throw err;
@@ -320,7 +315,6 @@ async function googleFetch<T>(url: string, accessToken: string, init?: RequestIn
 // ──────────────────────────────────────────────
 // DB access (service role — RLS doesn't apply)
 // ──────────────────────────────────────────────
-
 
 /**
  * Record that the grant is permanently dead.
@@ -361,7 +355,6 @@ async function markNeedsReconnect(userId: string, reason: string): Promise<void>
     console.error("[google] could not record needs_reconnect", err);
   }
 }
-
 
 /** Row from migration 024. Null before the migration is applied. */
 async function loadConnectionRow(userId: string): Promise<GoogleConnectionRow | null> {
@@ -404,7 +397,6 @@ interface GoogleConnectionRow {
   google_email: string | null;
 }
 
-
 /**
  * Record the task <-> event mapping in calendar_events (migration 024).
  *
@@ -433,8 +425,7 @@ async function recordCalendarEventMapping(
     },
     { onConflict: "user_id,task_id" }
   );
-  console.log(`[gcal-sync] calendar_events upsert: uid=${userId} tid=${taskId} eid=${googleEventId} err=${error} data=${JSON.stringify(data)}`);
-  if (error) console.error(`[gcal-sync] calendar_events upsert FAILED:`, error);
+    if (error) console.error(`[gcal-sync] calendar_events upsert FAILED:`, error);
 }
 
 /** Drop the mapping by Google event id, for the delete path. */
@@ -449,7 +440,6 @@ async function clearCalendarEventMappingByEvent(
     .eq("google_event_id", googleEventId);
   if (error) console.error("[google] calendar_events delete failed", error);
 }
-
 
 export interface GoogleConnectionStatus {
   connected: boolean;
@@ -900,8 +890,7 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
     return { success: false, error: "Couldn't load your tasks" };
   }
 
-  console.log(`[gcal-sync] loaded ${rawTasks?.length ?? 0} tasks for user ${userId}`);
-
+  
   const result: SyncResult = {
     created: 0,
     updated: 0,
@@ -911,21 +900,17 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
   };
 
   for (const task of (rawTasks ?? []) as unknown as SyncableTask[]) {
-    console.log(`[gcal-sync] task: id=${task.id} title=${task.title} status=${task.status} deadline=${task.deadline ?? "none"} has_event=${!!task.google_event_id}`);
-
+    
     if (task.status === "COMPLETED") {
-      console.log(`[gcal-sync] SKIP: COMPLETED ${task.id} ${task.title}`);
-      if (task.google_event_id) {
+            if (task.google_event_id) {
         const del = await admin.from("tasks").update({ google_event_id: null }).eq("id", task.id);
-        console.log(`[gcal-sync] cleared event for completed task, err=${del.error}`);
-        result.removed += 1;
+                result.removed += 1;
       }
       continue;
     }
 
     if (!task.deadline) {
-      console.log(`[gcal-sync] SKIP: no deadline ${task.id} ${task.title}`);
-      continue;
+            continue;
     }
 
     console.debug(
@@ -959,12 +944,10 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
           .from("tasks")
           .update({ google_event_id: created.id })
           .eq("id", task.id);
-        console.log(`[gcal-sync] UPDATE tasks: task=${task.id} event=${created.id} err=${tUpd.error}`);
-
+        
         await recordCalendarEventMapping(userId, task.id, created.id);
         result.created += 1;
-        console.log(`[gcal-sync] CREATED event ${created.id} for task ${task.id}`);
-      }
+              }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown error";
       result.errors.push(`${task.id}: ${msg}`);
@@ -973,8 +956,7 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
   }
 
   const totalChanges = result.created + result.updated + result.removed;
-  console.log(`[gcal-sync] SYNC SUMMARY: created=${result.created} updated=${result.updated} removed=${result.removed} errors=${result.errors.length} totalChanges=${totalChanges}`);
-
+  
   if (result.errors.length === 0 || totalChanges > 0) {
     const syn = await admin
       .from("user_google_tokens")
@@ -983,8 +965,7 @@ async function fullSyncForUser(userId: string): Promise<ActionResponse<SyncResul
         ...(nextSyncToken ? { sync_token: nextSyncToken } : {}),
       })
       .eq("id", row.id);
-    console.log(`[gcal-sync] updated last_synced_at, err=${syn.error}`);
-  } else {
+      } else {
     console.error(`[gcal-sync] sync had errors, NOT updating last_synced_at. Errors:`, result.errors);
   }
 
