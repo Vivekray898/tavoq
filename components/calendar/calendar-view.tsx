@@ -93,10 +93,18 @@ export function CalendarView() {
     // that would otherwise prompt a reconnect.
     void queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
     if (res.success && res.data) {
-      const { created, updated, removed } = res.data;
-      toast.success(
-        `Calendar up to date — ${created} added, ${updated} updated, ${removed} removed`
-      );
+      const { created, updated, removed, errors } = res.data;
+      if (errors.length > 0) {
+        toast.error(
+          `Sync completed with ${errors.length} error${errors.length === 1 ? "" : "s"}: ${errors[0]}`
+        );
+      } else if (created + updated + removed === 0) {
+        toast.success("Calendar is already up to date");
+      } else {
+        toast.success(
+          `Calendar up to date — ${created} added, ${updated} updated, ${removed} removed`
+        );
+      }
     } else {
       toast.error(res.error ?? "Sync failed");
     }
