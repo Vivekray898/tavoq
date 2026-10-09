@@ -311,7 +311,7 @@ describe("mapping is written to calendar_events", () => {
   test("upserts the mapping on both create and update", () => {
     const src = action();
     assert.match(src, /recordCalendarEventMapping/);
-    assert.match(src, /from\("calendar_events"\)\.upsert\(/);
+    assert.match(src, /from\("calendar_events"\)\s*\n?\s*\.upsert\(/);
     assert.match(src, /onConflict: "user_id,task_id"/);
   });
 

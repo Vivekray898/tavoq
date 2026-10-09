@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { SUPPORT_EMAIL } from "@/lib/constants";
+import { LAST_UPDATED_READABLE } from "@/lib/constants";
 
 export const metadata = {
   title: { absolute: "Taskora Terms of Service" },
@@ -15,7 +16,7 @@ export default function TermsOfServicePage() {
     <div className="max-w-3xl">
       <h1 className="text-2xl font-semibold tracking-tight">Taskora Terms of Service</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Last updated: {new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}
+        Last updated: {LAST_UPDATED_READABLE}
       </p>
 
       <p className="mt-8 text-sm text-muted-foreground">

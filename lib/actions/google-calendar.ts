@@ -427,35 +427,85 @@ interface GoogleConnectionRow {
  * overwrite the first and one user's event would become unaddressable.
  * This table is what stops that; sync_mode records which strategy wrote it.
  */
+/**
+ * Whether `calendar_events.sync_mode` exists (migration 028).
+ *
+ * null = not probed yet. A deploy can ship this code before the migration is
+ * applied, and PostgREST rejects the WHOLE upsert on an unknown column. That
+ * failure used to be swallowed: every mapping went unwritten while
+ * `last_synced_at` still advanced, so the card read "0 tasks synced - last
+ * synced just now" over a calendar the events actually existed on.
+ *
+ * Probed once per instance, then the write degrades to omitting the column.
+ */
+let syncModeColumn: boolean | null = null;
+
+/**
+ * Is this PostgREST error the missing-column case?
+ *
+ * 42703 is Postgres' undefined_column. The message check covers older
+ * PostgREST, which reported it as a generic schema error.
+ */
+function isMissingSyncModeColumn(
+  error: { code?: string; message?: string } | null
+): boolean {
+  if (!error) return false;
+  if (error.code === "42703") return true;
+  const message = error.message ?? "";
+  return /sync_mode/.test(message) && /does not exist|column/i.test(message);
+}
+
 async function recordCalendarEventMapping(
   userId: string,
   taskId: string,
   googleEventId: string,
   mode: CalendarSyncMode = "personal"
-): Promise<void> {
+): Promise<string | null> {
   const admin = createAdminClient();
   const now = new Date().toISOString();
-  const { error } = await admin.from("calendar_events").upsert(
-    {
-      user_id: userId,
-      task_id: taskId,
-      google_event_id: googleEventId,
-      sync_mode: mode,
-      last_error: null,
-      last_synced_at: now,
-      updated_at: now,
-    },
-    { onConflict: "user_id,task_id" }
-  );
-  // Swallowed on purpose but LOUDLY: a missing mapping means the event
-  // exists in Google with nothing pointing at it, which is how "the sync
-  // said 0 but my calendar is empty" happens. It must never be silent.
+  const base = {
+    user_id: userId,
+    task_id: taskId,
+    google_event_id: googleEventId,
+    last_error: null,
+    last_synced_at: now,
+    updated_at: now,
+  };
+  // Include the diagnostic column unless we already know it is absent.
+  const payload = syncModeColumn === false ? base : { ...base, sync_mode: mode };
+
+  let { error } = await admin
+    .from("calendar_events")
+    .upsert(payload, { onConflict: "user_id,task_id" });
+
+  if (error && isMissingSyncModeColumn(error) && syncModeColumn !== false) {
+    // Migration 028 has not been applied yet. Retry WITHOUT the column so the
+    // mapping is still recorded. Losing the mapping is what made the counter
+    // read 0 over a calendar that actually had events on it; sync_mode only
+    // records which strategy wrote a row, and losing THAT is cosmetic.
+    syncModeColumn = false;
+    console.error(
+      "[gcal-sync] calendar_events.sync_mode is missing — apply migration 028. Writing the mapping without it for now.",
+      { userId, taskId }
+    );
+    ({ error } = await admin
+      .from("calendar_events")
+      .upsert(base, { onConflict: "user_id,task_id" }));
+  } else if (!error) {
+    syncModeColumn = true;
+  }
+
   if (error) {
+    // RETURNED, not swallowed. A mapping that fails to write leaves an event
+    // in Google that nothing points at, and the count on the card then
+    // disagrees with the calendar permanently — silently.
     console.error(
       "[gcal-sync] calendar_events upsert FAILED",
       { userId, taskId, googleEventId, mode, error: error.message }
     );
+    return error.message;
   }
+  return null;
 }
 
 /** Drop the mapping by Google event id, for the delete path. */
@@ -525,26 +575,31 @@ export async function getGoogleCalendarStatus(): Promise<
       };
     }
 
-    // Count events in the authoritative calendar_events table (migration 024+),
-    // scoped to this user — the count is "events on MY calendar", which with
-    // two calendars per task is not the same as the task-global column.
+    // "N tasks synced" means N events exist on THIS user's calendar, in
+    // THIS user's mode. A user has exactly one mode, derived from their
+    // role, so rows written by the other strategy are not evidence about
+    // this calendar and must not be counted into it.
     let syncedTaskCount = 0;
-    const { count: calendarEventsCount, error: countError } = await createAdminClient()
-      .from("calendar_events")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", profile.id);
-    if (!countError && typeof calendarEventsCount === "number") {
-      syncedTaskCount = calendarEventsCount;
-    } else {
-      // Legacy fallback: count tasks that already have an event id stored.
-      // Personal mode only — in admin mode that column belongs to whoever
-      // wrote it last and is not evidence about this calendar.
-      const { count: legacyCount } = await createAdminClient()
-        .from("tasks")
-        .select("id", { count: "exact", head: true })
-        .eq("assigned_to", profile.id)
-        .neq("google_event_id", null);
-      syncedTaskCount = legacyCount ?? 0;
+    const { count, error: countError } = await countSyncedEvents(
+      profile.id,
+      syncMode
+    );
+    syncedTaskCount = count;
+    if (countError) {
+      // Legacy fallback for an unmigrated database: count tasks that carry
+      // the old task-global event id. Personal mode only — in admin mode
+      // that column holds whichever user wrote last and says nothing about
+      // this calendar.
+      if (syncMode === "personal") {
+        const { count: legacyCount } = await createAdminClient()
+          .from("tasks")
+          .select("id", { count: "exact", head: true })
+          .eq("assigned_to", profile.id)
+          .neq("google_event_id", null);
+        syncedTaskCount = legacyCount ?? 0;
+      } else {
+        syncedTaskCount = 0;
+      }
     }
 
     // How many tasks this user's mode would select right now, synced or not.
@@ -936,6 +991,41 @@ async function getTasksForCalendarSync(
  * Counted in the database rather than by loading rows: this runs on every
  * /calendar render, and the count does not need titles or descriptions.
  */
+/**
+ * How many calendar events are recorded for one user, in one mode.
+ *
+ * Mode-scoped because the two strategies write different events for the
+ * same task: an admin_assignment row is the admin's copy and a personal row
+ * is the employee's. Counting both would report events the user cannot see.
+ *
+ * Degrades to an unscoped count when migration 028 has not been applied —
+ * every row then belongs to whichever mode this user is in anyway, since
+ * only one mode ever runs for them.
+ */
+async function countSyncedEvents(
+  userId: string,
+  mode: CalendarSyncMode
+): Promise<{ count: number; error: unknown | null }> {
+  const admin = createAdminClient();
+  const run = async (withMode: boolean) => {
+    let q = admin
+      .from("calendar_events")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId);
+    if (withMode) q = q.eq("sync_mode", mode);
+    return q;
+  };
+
+  let res = await run(syncModeColumn !== false);
+  if (res.error && isMissingSyncModeColumn(res.error)) {
+    syncModeColumn = false;
+    res = await run(false);
+  } else if (!res.error) {
+    syncModeColumn = true;
+  }
+  return { count: res.count ?? 0, error: res.error ?? null };
+}
+
 async function countEligibleTasks(
   userId: string,
   mode: CalendarSyncMode
@@ -1011,7 +1101,8 @@ export async function syncTaskToCalendar(
         accessToken,
         { method: "PUT", body: JSON.stringify(event) }
       );
-      await recordCalendarEventMapping(profile.id, taskId, existing, mode);
+      const mapError = await recordCalendarEventMapping(profile.id, taskId, existing, mode);
+      if (mapError) return { success: false, error: `Couldn't record the sync: ${mapError}` };
       return { success: true, data: { googleEventId: existing } };
     }
 
@@ -1023,7 +1114,10 @@ export async function syncTaskToCalendar(
       return { success: false, error: "Google Calendar returned no event id" };
     }
 
-    await recordCalendarEventMapping(profile.id, taskId, created.id, mode);
+    const createdMapError = await recordCalendarEventMapping(profile.id, taskId, created.id, mode);
+    if (createdMapError) {
+      return { success: false, error: `Couldn't record the sync: ${createdMapError}` };
+    }
     if (mode === "personal") {
       await admin.from("tasks").update({ google_event_id: created.id }).eq("id", taskId);
     }
@@ -1217,7 +1311,14 @@ async function fullSyncForUser(
           accessToken,
           { method: "PUT", body: JSON.stringify(body) }
         );
-        await recordCalendarEventMapping(userId, task.id, existing, mode);
+        // A mapping that cannot be written is a real failure: the event is
+        // in Google but unaddressable, so the next run would create a
+        // duplicate. Thrown so the catch records it in errors[] and the
+        // card cannot claim a clean sync.
+        const putMapError = await recordCalendarEventMapping(userId, task.id, existing, mode);
+        if (putMapError) {
+          throw new Error(`event updated but its sync record could not be saved: ${putMapError}`);
+        }
         result.updated += 1;
         console.log("[gcal-sync] updated event", {
           taskId: task.id,
@@ -1239,7 +1340,10 @@ async function fullSyncForUser(
         if (!created?.id) {
           throw new Error("Google Calendar returned success without an event id");
         }
-        await recordCalendarEventMapping(userId, task.id, created.id, mode);
+        const createMapError = await recordCalendarEventMapping(userId, task.id, created.id, mode);
+        if (createMapError) {
+          throw new Error(`event created but its sync record could not be saved: ${createMapError}`);
+        }
         // Legacy column, personal mode only — see mappedEventId.
         if (mode === "personal") {
           await admin.from("tasks").update({ google_event_id: created.id }).eq("id", task.id);
@@ -1709,7 +1813,10 @@ async function syncSingleTaskForUser(
         accessToken,
         { method: "PUT", body: JSON.stringify(event) }
       );
-      await recordCalendarEventMapping(userId, task.id, existing, mode);
+      const singleMapError = await recordCalendarEventMapping(userId, task.id, existing, mode);
+      if (singleMapError) {
+        console.error("[gcal-sync] could not record updated event", { userId, taskId: task.id, error: singleMapError });
+      }
     } catch (err) {
       // A stale id (event deleted in Google) leaves us unable to update.
       // Fall back to an insert so the event is not simply lost.
@@ -1766,7 +1873,10 @@ async function insertEvent(
       console.error("[google] insert returned no event id", { userId, taskId, mode });
       return;
     }
-    await recordCalendarEventMapping(userId, taskId, created.id, mode);
+    const insertMapError = await recordCalendarEventMapping(userId, taskId, created.id, mode);
+    if (insertMapError) {
+      console.error("[gcal-sync] could not record created event", { userId, taskId, error: insertMapError });
+    }
     // Legacy column, personal mode only — see mappedEventId in fullSyncForUser.
     if (mode === "personal") {
       await admin.from("tasks").update({ google_event_id: created.id }).eq("id", taskId);

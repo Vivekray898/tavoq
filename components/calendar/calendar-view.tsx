@@ -6,6 +6,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CalendarDays,
   Check,
+  ChevronLeft,
+  ChevronRight,
   ExternalLink,
   Loader2,
   Mail,
@@ -17,35 +19,40 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SkeletonList } from "@/components/shared/skeleton-loader";
 import { PushPermissionCard } from "@/components/notifications/push-permission-card";
-import { googleCalendarOptions } from "@/lib/queries/options";
+import { googleCalendarOptions, taskListOptions } from "@/lib/queries/options";
 import {
   connectGoogleCalendar,
   disconnectGoogleCalendar,
   syncAllTasksToCalendar,
+  type SyncResult,
 } from "@/lib/actions/google-calendar";
 import { formatRelativeTime, cn } from "@/lib/utils";
-import type { Task } from "@/types/database";
+import { TASK_STATUS_COLORS, TASK_STATUS_LABELS } from "@/lib/constants";
+import { toCalendarDate } from "@/lib/google/calendar";
+import type { TaskListItem } from "@/lib/actions/tasks";
+
+/** Chips drawn inside one day cell before it collapses to "+N more". */
+const MAX_CHIPS = 3;
 
 /**
  * §71 — Calendar & notifications, out of the profile page.
  *
- * Connecting Google Calendar was buried under /profile, where nobody
- * looked; employees consequently never connected and their calendars
- * silently stayed empty. This page is now the obvious place to find it,
- * and it shows something useful even before connecting: a month of the
- * deadlines the user already has.
+ * Connecting Google Calendar used to sit under /profile where nobody found
+ * it, so employees never connected and their calendars stayed empty.
  *
- * Push lives here for the same reason — it is the other half of "don't
- * miss a deadline", and both cards describe the same promise.
+ * The month grid below is a real calendar rather than a dot grid: deadlines
+ * sit inside the day they belong to, so a person can see what a given day
+ * holds without counting dots.
  */
 export function CalendarView() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery(googleCalendarOptions);
   const [working, setWorking] = useState<"connect" | "sync" | "disconnect" | null>(null);
+  // The last run's outcome, kept on screen. A toast is gone in a few
+  // seconds, which is why "the result never showed up" was reported — the
+  // card now carries the answer until the next sync.
+  const [syncReport, setSyncReport] = useState<SyncResult | null>(null);
 
-  // Surface the OAuth result once, on mount, then clean the URL. The
-  // callback route redirects here with ?gcal=connected, and without this
-  // the connect would appear to do nothing at all.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const result = params.get("gcal");
@@ -53,9 +60,6 @@ export function CalendarView() {
 
     if (result === "connected") {
       toast.success("Google Calendar connected");
-      // The connection was written server-side after this page's query
-      // was already in flight, so refetch rather than wait for a stale
-      // cached answer.
       void queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
     } else if (result === "denied") {
       toast.error("Google Calendar connection cancelled");
@@ -87,56 +91,22 @@ export function CalendarView() {
     setWorking("sync");
     const res = await syncAllTasksToCalendar();
     setWorking(null);
-    // Invalidate on BOTH outcomes. A revoked grant makes the server
-    // delete the token row, so the cached status is now wrong — keeping
-    // it would keep showing "connected" and hide the dashboard banner
-    // that would otherwise prompt a reconnect.
-    void queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
 
-    if (!res.success || !res.data) {
-      // An expired grant is a reconnect, not a generic failure. Saying
-      // "Sync failed" would send the user looking for a bug in their
-      // tasks instead of at the grant they revoked.
-      if (res.success) toast.error("Calendar sync returned no result");
-      else toast.error(res.error ?? "Sync failed");
+    // Refetch on BOTH outcomes, and AWAIT it. The card reads its count from
+    // calendar_events, which this action just wrote; not awaiting left the
+    // previous numbers on screen, and a revoked grant additionally needs the
+    // new "not connected" state to land. This sits BEFORE the branch on
+    // success so a failure refetches too.
+    await queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
+
+    if (res.success && res.data) {
+      setSyncReport(res.data);
+      reportSyncOutcome(res.data);
       return;
     }
 
-    const r = res.data;
-    const noun = r.mode === "admin_assignment" ? "assigned tasks" : "tasks";
-
-    if (r.errors.length > 0) {
-      toast.error(
-        `${r.errors.length} ${r.errors.length === 1 ? "task" : "tasks"} could not be synchronized — ${r.errors[0]}`
-      );
-      return;
-    }
-
-    if (r.eligibleTasks === 0) {
-      // Never "already up to date" here. Zero eligible tasks means nothing
-      // matched this calendar, which is a different fact from "nothing
-      // changed" and was the whole reason this bug read as success.
-      toast.info(
-        `No eligible ${noun} were found for this calendar${
-          r.rawTasksLoaded > 0 ? ` — ${r.rawTasksLoaded} task${r.rawTasksLoaded === 1 ? "" : "s"} checked, all completed or without a deadline` : ""
-        }`
-      );
-      return;
-    }
-
-    const changes = r.created + r.updated + r.removed;
-    if (changes === 0) {
-      toast.success(
-        `Calendar is already up to date — ${r.eligibleTasks} ${r.eligibleTasks === 1 ? "task" : "tasks"} checked`
-      );
-      return;
-    }
-
-    toast.success(
-      `${r.created} ${r.created === 1 ? "task" : "tasks"} added to Google Calendar` +
-        (r.updated ? `, ${r.updated} updated` : "") +
-        (r.removed ? `, ${r.removed} removed` : "")
-    );
+    setSyncReport(null);
+    toast.error(res.success ? "Calendar sync returned no result" : res.error ?? "Sync failed");
   }
 
   async function handleDisconnect() {
@@ -144,7 +114,8 @@ export function CalendarView() {
     const res = await disconnectGoogleCalendar();
     setWorking(null);
     if (res.success) {
-      void queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
+      setSyncReport(null);
+      await queryClient.invalidateQueries({ queryKey: googleCalendarOptions.queryKey });
       toast.success("Google Calendar disconnected");
     } else {
       toast.error(res.error ?? "Couldn't disconnect");
@@ -191,12 +162,7 @@ export function CalendarView() {
                         {data?.lastSyncedAt
                           ? ` · last synced ${formatRelativeTime(data.lastSyncedAt)}`
                           : " · never synced"}
-                        {data?.eligibleTaskCount ? (
-                          <>
-                            {" · "}
-                            {data.eligibleTaskCount} eligible
-                          </>
-                        ) : null}
+                        {` · ${data?.eligibleTaskCount ?? 0} eligible`}
                       </p>
                     </div>
                   </div>
@@ -238,6 +204,8 @@ export function CalendarView() {
                     ? "Work you assign syncs to your calendar automatically, as it is assigned, edited, or completed. This button only re-checks for drift."
                     : "Tasks sync automatically when they're assigned, edited, or completed. This button only re-checks for drift."}
                 </p>
+
+                {syncReport ? <SyncReport result={syncReport} /> : null}
               </div>
             ) : (
               <div className="rounded-xl border bg-card px-4 py-4">
@@ -263,9 +231,9 @@ export function CalendarView() {
                     disabled={working !== null}
                   >
                     {working === "connect" ? (
-                      <Loader2 className="size-3.5 animate-spin" />
+                      <Loader2 className="size-4 animate-spin" />
                     ) : (
-                      <ExternalLink className="size-3.5" />
+                      <ExternalLink className="size-4" />
                     )}
                     Connect Google Calendar
                   </Button>
@@ -274,10 +242,10 @@ export function CalendarView() {
             )}
           </section>
 
-          {/* ── Deadline preview ─────────────────────────────── */}
+          {/* ── Month view ───────────────────────────────────── */}
           <section className="space-y-2">
-            <h2 className="text-sm font-semibold">Your upcoming deadlines</h2>
-            <DeadlinePreview />
+            <h2 className="text-sm font-semibold">Your deadlines</h2>
+            <MonthCalendar />
           </section>
 
           {/* ── Push ─────────────────────────────────────────── */}
@@ -305,59 +273,204 @@ export function CalendarView() {
 }
 
 /**
- * A month grid of the user's own unfinished task deadlines.
+ * One sentence describing what a run actually did.
  *
- * Deliberately read-only and scoped to the viewer: the point is to show
- * that there IS something to sync, not to become a second task manager.
- * Deadlines come from the shared tasks cache, so this costs no extra
- * request when the dashboard has already loaded.
+ * Shared by the toast and the on-card report so the two can never disagree
+ * about what happened.
  */
-function DeadlinePreview() {
-  const { data: tasks, isLoading } = useQuery({
-    queryKey: ["myTasks"],
-    queryFn: async () => {
-      const { getTasks } = await import("@/lib/actions/tasks");
-      const res = await getTasks();
-      if (!res.success || !res.data) throw new Error("Failed to load your tasks");
-      return res.data;
-    },
-    staleTime: 60_000,
-  });
+function describeOutcome(r: SyncResult): { tone: "error" | "info" | "success"; text: string } {
+  const assigned = r.mode === "admin_assignment";
+  const noun = assigned ? "assigned task" : "task";
+  const plural = assigned ? "assigned tasks" : "tasks";
 
-  const { month, byDay } = useMemo(() => {
-    const now = new Date();
-    const map = new Map<string, Task[]>();
+  if (r.errors.length > 0) {
+    return {
+      tone: "error",
+      text: `${r.errors.length} ${r.errors.length === 1 ? noun : `${noun}s`} could not be synchronized — ${r.errors[0]}`,
+    };
+  }
+  // Never "already up to date": nothing matched this calendar, which is a
+  // different fact and the one that let the original bug read as success.
+  if (r.eligibleTasks === 0) {
+    return {
+      tone: "info",
+      text:
+        `No eligible ${plural} were found for this calendar` +
+        (r.rawTasksLoaded > 0 ? ` — ${r.rawTasksLoaded} checked, all completed or without a deadline.` : "."),
+    };
+  }
+  if (r.created + r.updated + r.removed === 0) {
+    return {
+      tone: "success",
+      text: `Calendar is already up to date — ${r.eligibleTasks} ${r.eligibleTasks === 1 ? "task" : "tasks"} checked.`,
+    };
+  }
+  return {
+    tone: "success",
+    text:
+      `${r.created} ${r.created === 1 ? noun : `${noun}s`} added to Google Calendar` +
+      (r.updated ? `, ${r.updated} updated` : "") +
+      (r.removed ? `, ${r.removed} removed` : "") +
+      ".",
+  };
+}
+
+function reportSyncOutcome(r: SyncResult) {
+  const { tone, text } = describeOutcome(r);
+  if (tone === "error") toast.error(text);
+  else if (tone === "info") toast.info(text);
+  else toast.success(text);
+}
+
+/**
+ * The last run's outcome, on screen rather than in a toast.
+ *
+ * The counter row matters as much as the headline: it is what makes a zero
+ * explicable instead of mysterious.
+ */
+function SyncReport({ result }: { result: SyncResult }) {
+  const { tone, text } = describeOutcome(result);
+  return (
+    <div className="mt-3 border-t pt-3">
+      <p className={cn("text-[13px]", tone === "error" ? "text-destructive" : "text-muted-foreground")}>
+        {text}
+      </p>
+      <p className="mt-1 text-[12px] text-muted-foreground tabular-nums">
+        {result.rawTasksLoaded} checked · {result.eligibleTasks} eligible ·{" "}
+        {result.alreadyMapped} already on the calendar · {result.skippedCompleted} completed ·{" "}
+        {result.skippedMissingDeadline} without a deadline
+      </p>
+    </div>
+  );
+}
+
+/** Local YYYY-MM-DD. Never toISOString(), which shifts by timezone. */
+function ymdKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
+/** Parse "2026-10" into the local first of that month. */
+function monthStart(monthKey: string): Date {
+  const [y, m] = monthKey.split("-").map(Number);
+  return new Date(y, (m ?? 1) - 1, 1);
+}
+
+/**
+ * Every cell of the displayed month, padded to whole Monday-first weeks.
+ *
+ * Always 42 cells (6 rows). A five-week month renders one empty row rather
+ * than reflowing, so the grid does not change height as the user pages
+ * through months — the same reason Google Calendar holds a fixed six rows.
+ */
+function monthCells(monthKey: string): { dateKey: string; day: number; inMonth: boolean }[] {
+  const first = monthStart(monthKey);
+  const leading = (first.getDay() + 6) % 7; // Monday-first
+  const start = new Date(first);
+  start.setDate(first.getDate() - leading);
+
+  return Array.from({ length: 42 }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    return {
+      dateKey: ymdKey(d),
+      day: d.getDate(),
+      inMonth: d.getMonth() === first.getMonth(),
+    };
+  });
+}
+
+/**
+ * A Google Calendar–shaped month view over the user's own tasks.
+ *
+ * Reuses `taskListOptions` — the same query and cache key as the task list —
+ * so the grid cannot drift from what RLS already permits this user to see,
+ * and a task mutation invalidates both at once. It previously used its own
+ * `["myTasks"]` key, which nothing in the app ever invalidated, so the grid
+ * served stale tasks long after an edit.
+ */
+function MonthCalendar() {
+  const { data: tasks, isLoading } = useQuery(taskListOptions);
+
+  // Today in the app's calendar timezone. `new Date().toISOString()` reads as
+  // yesterday for anyone east of Greenwich after 18:30.
+  const todayKey = useMemo(() => toCalendarDate(new Date()), []);
+  const [monthKey, setMonthKey] = useState(() => todayKey.slice(0, 7));
+  const [selected, setSelected] = useState(todayKey);
+
+  const byDay = useMemo(() => {
+    const map = new Map<string, TaskListItem[]>();
     for (const task of tasks ?? []) {
       if (!task.deadline) continue;
-      if (task.status === "COMPLETED") continue;
-      const key = new Date(task.deadline).toISOString().slice(0, 10);
+      // The same helper the Google event body uses, so a deadline typed as
+      // 7 Oct lands on 7 Oct here AND on 7 Oct there. Slicing the ISO string
+      // instead moved IST deadlines back a day.
+      const key = toCalendarDate(new Date(task.deadline));
       const list = map.get(key) ?? [];
       list.push(task);
       map.set(key, list);
     }
-    return { month: new Date(now.getFullYear(), now.getMonth(), 1), byDay: map };
+    for (const list of map.values()) {
+      list.sort((a, b) => a.title.localeCompare(b.title));
+    }
+    return map;
   }, [tasks]);
 
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const total = useMemo(() => {
-    let n = 0;
-    for (const list of byDay.values()) n += list.length;
-    return n;
-  }, [byDay]);
+  const cells = useMemo(() => monthCells(monthKey), [monthKey]);
+  const selectedTasks = byDay.get(selected) ?? [];
+
+  // Paging moves the selection to the 1st so the detail panel always
+  // describes a day that is actually visible in the grid.
+  function shiftMonth(delta: number) {
+    const d = monthStart(monthKey);
+    d.setMonth(d.getMonth() + delta);
+    const next = ymdKey(d).slice(0, 7);
+    setMonthKey(next);
+    setSelected(`${next}-01`);
+  }
+
+  function goToday() {
+    setMonthKey(todayKey.slice(0, 7));
+    setSelected(todayKey);
+  }
+
+  const title = monthStart(monthKey).toLocaleDateString("en-IN", {
+    month: "long",
+    year: "numeric",
+  });
 
   return (
     <div className="space-y-2 rounded-xl border bg-card p-3">
-      <div className="flex items-baseline justify-between gap-2 px-1">
-        <p className="text-sm font-medium">
-          {month.toLocaleDateString("en-IN", { month: "long", year: "numeric" })}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {total === 0
-            ? "No dated deadlines this month"
-            : `${total} task${total === 1 ? "" : "s"} with a deadline`}
-        </p>
+      {/* ── Navigation ─────────────────────────────────────── */}
+      <div className="flex items-center justify-between gap-2 px-1">
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Previous month"
+            onClick={() => shiftMonth(-1)}
+          >
+            <ChevronLeft className="size-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Next month"
+            onClick={() => shiftMonth(1)}
+          >
+            <ChevronRight className="size-4" />
+          </Button>
+          <p className="ml-1 text-sm font-medium">{title}</p>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={goToday}>
+          Today
+        </Button>
       </div>
 
+      {/* ── Weekday header ─────────────────────────────────── */}
       <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-medium text-muted-foreground">
         {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
           <div key={d} className="py-1">
@@ -366,97 +479,139 @@ function DeadlinePreview() {
         ))}
       </div>
 
+      {/* ── Grid ───────────────────────────────────────────── */}
       {isLoading ? (
         <div className="grid grid-cols-7 gap-1" aria-hidden>
-          {Array.from({ length: 35 }).map((_, i) => (
-            <div key={i} className="aspect-square animate-pulse rounded-md bg-muted/60" />
+          {Array.from({ length: 42 }).map((_, i) => (
+            <div key={i} className="min-h-[92px] animate-pulse rounded-md bg-muted/60" />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-7 gap-1">{monthCells(month, byDay, todayKey)}</div>
+        <div className="grid grid-cols-7 gap-1" role="grid" aria-label={title}>
+          {cells.map((cell) => {
+            const dayTasks = byDay.get(cell.dateKey) ?? [];
+            const isToday = cell.dateKey === todayKey;
+            const isSelected = cell.dateKey === selected;
+            const isPast = cell.dateKey < todayKey;
+            const overflow = dayTasks.length - MAX_CHIPS;
+
+            return (
+              <div
+                key={cell.dateKey}
+                role="gridcell"
+                aria-selected={isSelected}
+                aria-label={`${formatDayLabel(cell.dateKey)}, ${
+                  dayTasks.length === 1 ? "1 task" : `${dayTasks.length} tasks`
+                }`}
+                tabIndex={0}
+                onClick={() => setSelected(cell.dateKey)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setSelected(cell.dateKey);
+                  }
+                }}
+                className={cn(
+                  "flex min-h-[92px] cursor-pointer flex-col gap-1 rounded-md border p-1 text-left transition-colors",
+                  cell.inMonth ? "bg-card" : "bg-muted/20",
+                  !cell.inMonth && "opacity-50",
+                  isSelected
+                    ? "border-ring ring-1 ring-ring"
+                    : isToday
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:bg-accent/40",
+                  "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                )}
+              >
+                <span
+                  className={cn(
+                    "flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] tabular-nums",
+                    isToday && "bg-primary font-semibold text-primary-foreground"
+                  )}
+                >
+                  {cell.day}
+                </span>
+
+                {dayTasks.slice(0, MAX_CHIPS).map((task) => (
+                  <Link
+                    key={task.id}
+                    href={`/tasks/${task.id}`}
+                    onClick={(e) => e.stopPropagation()}
+                    title={`${task.title} — ${TASK_STATUS_LABELS[task.status]}`}
+                    aria-label={`${task.title}, ${TASK_STATUS_LABELS[task.status]}, due ${formatDayLabel(cell.dateKey)}`}
+                    className={cn(
+                      "block truncate rounded px-1 py-0.5 text-[10px] leading-tight font-medium",
+                      TASK_STATUS_COLORS[task.status],
+                      task.status === "COMPLETED" && "line-through opacity-70",
+                      isPast && task.status !== "COMPLETED" && "ring-1 ring-destructive/40"
+                    )}
+                  >
+                    {task.title}
+                  </Link>
+                ))}
+
+                {overflow > 0 ? (
+                  <span className="px-1 text-[10px] text-muted-foreground">+{overflow} more</span>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
       )}
 
-      {/* The list below the grid is what makes the dots legible — a dot
-          alone tells the user nothing about which task it is. */}
-      {total > 0 ? (
-        <ul className="divide-y border-t pt-1">
-          {[...byDay.entries()]
-            .sort(([a], [b]) => a.localeCompare(b))
-            .slice(0, 4)
-            .flatMap(([date, list]) =>
-              list.map((task) => (
-                <li key={task.id}>
-                  <Link
-                    href={`/tasks/${task.id}`}
-                    className="flex items-center justify-between gap-3 px-1 py-2 text-[13px] transition-colors hover:bg-accent/50"
+      {/* ── Selected day detail ────────────────────────────── */}
+      <div className="border-t pt-2">
+        <div className="flex items-baseline justify-between gap-2 px-1">
+          <p className="text-sm font-medium">{formatDayLabel(selected, true)}</p>
+          <p className="text-xs text-muted-foreground">
+            {selectedTasks.length === 0
+              ? "No tasks on this day."
+              : `${selectedTasks.length} task${selectedTasks.length === 1 ? "" : "s"}`}
+          </p>
+        </div>
+
+        {selectedTasks.length > 0 ? (
+          <ul className="mt-1 divide-y">
+            {selectedTasks.map((task) => (
+              <li key={task.id}>
+                <Link
+                  href={`/tasks/${task.id}`}
+                  className="flex items-center justify-between gap-3 px-1 py-2 text-[13px] transition-colors hover:bg-accent/50"
+                >
+                  <span
+                    className={cn(
+                      "truncate",
+                      task.status === "COMPLETED" && "text-muted-foreground line-through"
+                    )}
                   >
-                    <span className="truncate">{task.title}</span>
-                    <span className="shrink-0 tabular-nums text-muted-foreground">
-                      {new Date(date).toLocaleDateString("en-IN", {
-                        day: "numeric",
-                        month: "short",
-                      })}
-                    </span>
-                  </Link>
-                </li>
-              ))
-            )}
-        </ul>
-      ) : null}
+                    {task.title}
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {TASK_STATUS_LABELS[task.status]}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
     </div>
   );
 }
 
 /**
- * The month's day cells, Monday-first.
+ * "3 Oct", or "Saturday, 3 October 2026".
  *
- * Extracted so the grid renders from one computation rather than an
- * inline IIFE, which keeps the component readable and makes the
- * padding/tail rules explicit in one place.
+ * Parsed as LOCAL noon rather than midnight: at midnight a DST boundary can
+ * push the formatted date onto the neighbouring day.
  */
-function monthCells(
-  month: Date,
-  byDay: Map<string, Task[]>,
-  todayKey: string
-) {
-  const leading = (new Date(month.getFullYear(), month.getMonth(), 1).getDay() + 6) % 7;
-  const daysInMonth = new Date(
-    month.getFullYear(),
-    month.getMonth() + 1,
-    0
-  ).getDate();
-
-  return Array.from({ length: leading + daysInMonth }, (_, idx) => {
-    if (idx < leading) {
-      return <div key={`pad-${idx}`} className="aspect-square" />;
-    }
-    const day = idx - leading + 1;
-    const date = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(
-      2,
-      "0"
-    )}-${String(day).padStart(2, "0")}`;
-    const dayTasks = byDay.get(date) ?? [];
-    const isToday = date === todayKey;
-    const isPast = date < todayKey && dayTasks.length > 0;
-    return (
-      <div
-        key={date}
-        className={cn(
-          "relative flex aspect-square flex-col items-center justify-center rounded-md border text-xs",
-          dayTasks.length > 0 ? "border-border bg-muted/50" : "border-transparent",
-          isToday && "ring-1 ring-ring"
-        )}
-      >
-        <span className={cn(dayTasks.length > 0 && "font-semibold")}>{day}</span>
-        {dayTasks.length > 0 ? (
-          <span
-            className={cn(
-              "absolute bottom-1 size-1 rounded-full",
-              isPast ? "bg-destructive" : "bg-primary"
-            )}
-          />
-        ) : null}
-      </div>
-    );
+function formatDayLabel(dateKey: string, long = false): string {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  const date = new Date(y, (m ?? 1) - 1, d ?? 1, 12);
+  return date.toLocaleDateString("en-IN", {
+    ...(long ? { weekday: "long" as const } : {}),
+    day: "numeric",
+    month: long ? ("long" as const) : ("short" as const),
+    ...(long ? { year: "numeric" as const } : {}),
   });
 }

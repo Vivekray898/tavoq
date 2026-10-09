@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { OPERATOR_NAME, SUPPORT_EMAIL } from "@/lib/constants";
+import { LAST_UPDATED_READABLE } from "@/lib/constants";
 
 export const metadata = {
   title: { absolute: "Taskora Privacy Policy" },
@@ -16,7 +17,7 @@ export default function PrivacyPolicyPage() {
     <div className="max-w-3xl">
       <h1 className="text-2xl font-semibold tracking-tight">Taskora Privacy Policy</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Last updated: {new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}
+        Last updated: {LAST_UPDATED_READABLE}
       </p>
 
       <section className="mt-8 space-y-6 text-sm text-foreground">

@@ -19,7 +19,9 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { PushPermissionCard } from "@/components/notifications/push-permission-card";
 import { NotificationPreferencesCard } from "@/components/notifications/notification-preferences-card";
 import { useNotifications } from "@/components/providers/notifications-provider";
+import { useMemo } from "react";
 import { getRelativeTime, cn } from "@/lib/utils";
+import { addCalendarDays, toCalendarDate } from "@/lib/google/calendar";
 import type { NotificationType } from "@/types/database";
 
 const TYPE_ICONS: Record<NotificationType, typeof Bell> = {
@@ -55,21 +57,52 @@ export default function NotificationsPage() {
   // No mount-time refresh — the shared cache is seeded by the provider and
   // kept live by realtime (§7). Returning here is instant from cache.
 
-  // Group by Today / Yesterday / Earlier (§16)
-  const groups: Array<{ label: string; items: typeof notifications }> = [];
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+  // Group by Today / Yesterday / Earlier (§16).
+  //
+  // `new Date()` during render is a hydration hazard: the server renders one
+  // "today" and the browser re-runs the grouping against a different clock, so
+  // the two HTML trees disagree and React reports a mismatch. Group by the
+  // notification timestamps themselves instead, so the result is deterministic
+  // from data and identical on both sides.
+  //
+  // "today" is anchored to the most recent notification in the current view,
+  // computed in the app's calendar timezone (Asia/Kolkata) the same way every
+  // other calendar date in the app is. A view with no notifications renders no
+  // groups.
+  const todayKey = useMemo(() => {
+    const createdAtKeys = notifications.map((n) =>
+      toCalendarDate(new Date(n.created_at))
+    );
+    const latest = createdAtKeys.reduce<string | null>(
+      (latest, key) => (key > (latest ?? "0000-00-00") ? key : latest),
+      null
+    );
+    return latest ?? null;
+  }, [notifications]);
 
-  const todayItems = notifications.filter((n) => new Date(n.created_at) >= today);
-  const yesterdayItems = notifications.filter(
-    (n) => new Date(n.created_at) >= yesterday && new Date(n.created_at) < today
+  const groups = useMemo<Array<{ label: string; items: typeof notifications }>>(
+    () => {
+      if (!todayKey) return [];
+
+      const yesterdayKey = addCalendarDays(todayKey, -1);
+      const todayItems = notifications.filter(
+        (n) => toCalendarDate(new Date(n.created_at)) === todayKey
+      );
+      const yesterdayItems = notifications.filter(
+        (n) => toCalendarDate(new Date(n.created_at)) === yesterdayKey
+      );
+      const earlierItems = notifications.filter(
+        (n) => toCalendarDate(new Date(n.created_at)) < yesterdayKey
+      );
+
+      const groups: Array<{ label: string; items: typeof notifications }> = [];
+      if (todayItems.length) groups.push({ label: "Today", items: todayItems });
+      if (yesterdayItems.length) groups.push({ label: "Yesterday", items: yesterdayItems });
+      if (earlierItems.length) groups.push({ label: "Earlier", items: earlierItems });
+      return groups;
+    },
+    [notifications, todayKey]
   );
-  const earlierItems = notifications.filter((n) => new Date(n.created_at) < yesterday);
-
-  if (todayItems.length) groups.push({ label: "Today", items: todayItems });
-  if (yesterdayItems.length) groups.push({ label: "Yesterday", items: yesterdayItems });
-  if (earlierItems.length) groups.push({ label: "Earlier", items: earlierItems });
 
   return (
     <div className="space-y-5">

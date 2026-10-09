@@ -6,24 +6,35 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TASK_STATUS_DOTS } from "@/lib/constants";
 import { isOverdue, cn } from "@/lib/utils";
+import { toCalendarDate } from "@/lib/google/calendar";
 import type { TaskListItem } from "@/lib/actions/tasks";
 
 /**
  * §8 Calendar / deadline view — a focused month grid of task deadlines.
  * Clicking a task opens the task detail view.
+ *
+ * "Today" and the displayed month come from `toCalendarDate`, never from
+ * `Date.getFullYear()`/`getMonth()`. Those read the HOST's timezone: this
+ * component is server-rendered, so a UTC server and an IST browser disagreed
+ * about which month to draw (and which cell to highlight) whenever the month
+ * turned over inside that window — a hydration mismatch, not a cosmetic one.
+ * `toCalendarDate` pins the zone to Asia/Kolkata, so both sides render the
+ * same string from the same instant.
  */
 export function CalendarView({ tasks }: { tasks: TaskListItem[] }) {
-  const [now] = useState(() => new Date());
-  const [month, setMonth] = useState(() => ({
-    year: now.getFullYear(),
-    month: now.getMonth(),
-  }));
+  // Resolved once. Recomputing per render made the value impure and let the
+  // highlight drift if a render crossed midnight.
+  const today = useMemo(() => toCalendarDate(new Date()), []);
+  const [month, setMonth] = useState(() => {
+    const [year, m] = today.split("-").map(Number);
+    return { year: year ?? 1970, month: (m ?? 1) - 1 };
+  });
 
   const byDay = useMemo(() => {
     const map = new Map<string, TaskListItem[]>();
     for (const t of tasks) {
       if (!t.deadline) continue;
-      const key = istDayKey(t.deadline);
+      const key = toCalendarDate(new Date(t.deadline));
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(t);
     }
@@ -45,12 +56,23 @@ export function CalendarView({ tasks }: { tasks: TaskListItem[] }) {
     return cells;
   }, [month]);
 
-  const monthLabel = new Date(Date.UTC(month.year, month.month, 1)).toLocaleDateString(
-    "en-IN",
-    { month: "long", year: "numeric", timeZone: "UTC" }
-  );
+  // Label must be coherent across server + client. toLocaleDateString would
+  // read the host timezone, which differs between a UTC/IST server and an IST
+  // browser whenever the month turns over — a hydration mismatch. Compute the
+  // label from the deterministic calendar date the component already uses.
+  const labelParts = today.split("-");
+  const labelYear = labelParts[0] ?? "";
+  const labelMonth = labelParts[1] ?? "01";
+  const MONTHS: readonly string[] = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+  ];
+  const monthLabel =
+    MONTHS[parseInt(labelMonth, 10) - 1] ?? "—" +
+    " " +
+    labelYear;
 
-  const todayKey = istDayKey(new Date().toISOString());
+  const todayKey = today;
 
   function shift(delta: number) {
     setMonth((m) => {
@@ -71,7 +93,10 @@ export function CalendarView({ tasks }: { tasks: TaskListItem[] }) {
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-xs"
-            onClick={() => setMonth({ year: now.getFullYear(), month: now.getMonth() })}
+            onClick={() => {
+              const [year, m] = today.split("-").map(Number);
+              setMonth({ year: year ?? 1970, month: (m ?? 1) - 1 });
+            }}
           >
             Today
           </Button>
@@ -144,9 +169,4 @@ export function CalendarView({ tasks }: { tasks: TaskListItem[] }) {
   );
 }
 
-/** Convert an ISO instant to the IST calendar day key (YYYY-MM-DD). */
-function istDayKey(instant: string): string {
-  const d = new Date(instant);
-  const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
-  return ist.toISOString().slice(0, 10);
-}
+

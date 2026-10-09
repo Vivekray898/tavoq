@@ -33,11 +33,22 @@ export function EmployeePaymentsView() {
   const isCurrentWeek = weekOffset === 0;
   const weekLabel = (() => {
     if (!data) return "";
-    const start = new Date(data.weekStart);
-    const end = new Date(new Date(data.weekEnd).getTime() - 24 * 60 * 60 * 1000);
-    const fmt = (d: Date) =>
-      d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
-    return `${fmt(start)} – ${fmt(end)}`;
+
+    // Deterministic, calendar-zone-pinned week label. Both bounds are plain
+    // ISO calendar dates from the server, so formatting them the same way on
+    // the server and the client produces the same text regardless of host
+    // timezone.
+    const fmt = (iso: string) =>
+      new Date(iso).toLocaleDateString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        day: "numeric",
+        month: "short",
+      });
+
+    const start = fmt(data.weekStart);
+    const end = fmt(data.weekEnd);
+
+    return `${start} – ${end}`;
   })();
 
   return (
@@ -274,12 +285,14 @@ export function EmployeePaymentsView() {
                 <div className="flex items-center justify-between gap-4">
                   <dt className="text-muted-foreground">Paid on</dt>
                   <dd>
-                    {new Date(detail.paid_at).toLocaleDateString("en-IN", {
-                      timeZone: "Asia/Kolkata",
-                      day: "numeric",
-                      month: "short",
-                      year: "numeric",
-                    })}
+                    <time dateTime={detail.paid_at}>
+                      {new Date(detail.paid_at).toLocaleDateString("en-IN", {
+                        timeZone: "Asia/Kolkata",
+                        day: "numeric",
+                        month: "short",
+                        year: "numeric",
+                      })}
+                    </time>
                   </dd>
                 </div>
               )}

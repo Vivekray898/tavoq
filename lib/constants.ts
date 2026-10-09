@@ -40,6 +40,32 @@ export const SUPPORT_EMAIL =
 export const OPERATOR_NAME =
   process.env.NEXT_PUBLIC_OPERATOR_NAME ?? "Creativoxa";
 
+/**
+ * Deterministic "last updated" readable for SSR pages so the server and
+ * browser always render the same date string, regardless of host timezone.
+ */
+const LAST_UPDATED_RAW =
+  process.env.NEXT_PUBLIC_LAST_UPDATED_DATE ?? "2026-10-09";
+
+export const LAST_UPDATED_READABLE: string = (() => {
+  const d = new Date(
+    new Date(
+      LAST_UPDATED_RAW + "T00:00:00+05:30"
+    ).toLocaleDateString("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    })
+  );
+  return d.toLocaleDateString("en-US", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+})();
+
 // ──────────────────────────────────────────────
 // Status model (§27) — exactly five task statuses
 // ──────────────────────────────────────────────
@@ -106,7 +132,6 @@ export const PRIORITY_LABELS: Record<TaskPriority, string> = {
   HIGH: "High",
   URGENT: "Urgent",
 };
-
 export const PRIORITY_COLORS: Record<TaskPriority, string> = {
   NONE: "bg-muted text-muted-foreground",
   LOW: "bg-muted text-muted-foreground",
@@ -139,7 +164,6 @@ export const LABEL_COLORS: Record<LabelColor, string> = {
   VIOLET: "bg-violet-400",
   PINK: "bg-pink-400",
 };
-
 export const LABEL_CHIP: Record<LabelColor, string> = {
   GRAY: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
   RED: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
@@ -163,7 +187,6 @@ export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   COMPLETED: "Completed",
   ARCHIVED: "Archived",
 };
-
 export const PROJECT_STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
   ACTIVE: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
@@ -181,7 +204,6 @@ export const PAYMENT_STATUS_LABELS: Record<PaymentStatus, string> = {
   PENDING: "Payment pending",
   PAID: "Paid",
 };
-
 export const PAYMENT_STATUS_COLORS: Record<PaymentStatus, string> = {
   NOT_APPLICABLE: "bg-muted text-muted-foreground",
   PENDING: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
@@ -196,20 +218,17 @@ export const LEDGER_STATUS_LABELS: Record<LedgerStatus, string> = {
   PAID: "Paid",
   CANCELLED: "Cancelled",
 };
-
 export const LEDGER_STATUS_COLORS: Record<LedgerStatus, string> = {
   PENDING: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
   PAID: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
   CANCELLED: "bg-muted text-muted-foreground",
 };
-
 export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
   UPI: "UPI",
   BANK_TRANSFER: "Bank transfer",
   CASH: "Cash",
   OTHER: "Other",
 };
-
 export const LEDGER_PAYMENT_TYPE_LABELS: Record<LedgerPaymentType, string> = {
   TASK_PAYOUT: "Task payout",
   CUSTOM: "Custom",
@@ -262,5 +281,4 @@ export const ALLOWED_FILE_TYPES = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 ];
-
 export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB

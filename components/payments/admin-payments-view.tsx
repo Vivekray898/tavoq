@@ -2539,7 +2539,10 @@ export function AdminPaymentsView() {
                 id="paid-on"
                 type="date"
                 value={paidOn}
-                max={new Date().toISOString().slice(0, 10)}
+                max={
+                  new Date()
+                    .toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })
+                }
                 onChange={(e) => setPaidOn(e.target.value)}
               />
             </div>

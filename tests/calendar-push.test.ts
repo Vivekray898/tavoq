@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import {
   classifyDeadline,
   REMINDER_TITLES,
@@ -8,6 +9,7 @@ import {
   type Horizon,
 } from "../lib/cron/deadline-horizon.ts";
 import { getNavForRole, getNavItemsForRole } from "../lib/navigation.ts";
+import { toCalendarDate } from "../lib/google/calendar.ts";
 
 /**
  * §71 — Google Calendar sync + Web Push.
@@ -666,5 +668,218 @@ describe("migration 021", () => {
     assert.match(s, /DROP TABLE|drops? everything|DOWN/i);
     assert.doesNotMatch(s, /DROP POLICY/);
     assert.doesNotMatch(s, /DROP ROW LEVEL SECURITY/i);
+  });
+});
+// ---------------------------------------------------------------------------
+// A mapping that cannot be written is a visible failure
+//
+// `last_synced_at` advances on any run that returns without throwing, while
+// the calendar_events upsert used to swallow its own error. The card therefore
+// reported "last synced just now · 0 tasks synced" forever: the counter and the
+// timestamp disagreed and nothing said why. The observed trigger was an
+// unapplied migration 028 — PostgREST rejects the whole statement on the
+// unknown `sync_mode` column, so every mapping write failed silently.
+// ---------------------------------------------------------------------------
+
+describe("a failed mapping write cannot pass as a successful sync", () => {
+  const action = () => strip(read("../lib/actions/google-calendar.ts"));
+
+  test("recordCalendarEventMapping returns the failure instead of swallowing it", () => {
+    const src = action();
+    const start = src.indexOf("async function recordCalendarEventMapping");
+    assert.ok(start > -1, "recordCalendarEventMapping not found");
+    const fn = src.slice(start, src.indexOf("\n}\n", start));
+
+    // The signature must admit a result — returning `Promise<void>` is what
+    // made swallowing invisible to every caller.
+    assert.match(
+      fn,
+      /\)\s*:\s*Promise<string \| null>/
+    );
+    assert.match(fn, /return error\.message/);
+    assert.match(
+      fn,
+      /console\.error\(\s*"\[gcal-sync\] calendar_events upsert FAILED"/
+    );
+    // And the success path is a null, not a bare `return`.
+    assert.match(fn, /return null/);
+  });
+
+  test("every call site checks the returned error", () => {
+    const src = action();
+    // Six call sites: create/update in the single-task action, create/update
+    // in the full sync, and create/update in the per-task insert. Each one
+    // must do something with the value, or the fix is only cosmetic.
+    const calls = src.match(/= await recordCalendarEventMapping\(/g) ?? [];
+    assert.equal(calls.length, 6, `expected 6 checked call sites, got ${calls.length}`);
+
+    const guarded = src.match(/if \(\w*[mM]apError\)/g) ?? [];
+    assert.equal(guarded.length, 6, `expected 6 guards, got ${guarded.length}`);
+  });
+
+  test("a mapping failure inside a full sync is recorded in errors[], not swallowed", () => {
+    const src = action();
+    const start = src.indexOf("async function fullSyncForUser");
+    const fn = src.slice(start, src.indexOf("\n}\n", start));
+    // Throwing is what routes it into the existing per-task catch, so the
+    // event is not counted as created and the run is not reported clean.
+    assert.match(fn, /event updated but its sync record could not be saved/);
+    assert.match(fn, /event created but its sync record could not be saved/);
+  });
+
+  test("an unapplied migration 028 degrades instead of blocking the sync", () => {
+    const src = action();
+    const start = src.indexOf("function isMissingSyncModeColumn");
+    const fn = src.slice(start, src.indexOf("\n}\n", start));
+    // 42703 is undefined_column. The message check is the backstop for
+    // clients that surface a friendlier string.
+    assert.match(fn, /error\.code === "42703"/);
+    assert.match(fn, /sync_mode/);
+
+    const rec = src.slice(src.indexOf("async function recordCalendarEventMapping"));
+    assert.match(rec, /isMissingSyncModeColumn\(error\)/);
+    // Retry without the column, and say so loudly — this log line is the
+    // discriminator between "migration not applied" and any other cause.
+    assert.match(rec, /calendar_events\.sync_mode is missing/);
+    assert.match(rec, /migration 028/);
+  });
+});
+
+describe("the synced counter is scoped to the caller's mode", () => {
+  const action = () => strip(read("../lib/actions/google-calendar.ts"));
+
+  test("countSyncedEvents filters on sync_mode", () => {
+    const src = action();
+    const start = src.indexOf("async function countSyncedEvents");
+    assert.ok(start > -1, "countSyncedEvents not found");
+    const fn = src.slice(start, src.indexOf("\n}\n", start));
+
+    assert.match(fn, /\.eq\("sync_mode", mode\)/);
+    // Reading every row would show an admin their employees' mappings.
+    assert.match(fn, /\.eq\("user_id", userId\)/);
+    // Same pre-migration tolerance as the writer, or the count breaks on a
+    // database the write path already tolerates.
+    assert.match(fn, /isMissingSyncModeColumn/);
+  });
+
+  test("the status action counts through the shared helper", () => {
+    const src = action();
+    const start = src.indexOf("export async function getGoogleCalendarStatus");
+    const fn = src.slice(start, src.indexOf("\nexport async function", start + 40));
+    assert.match(fn, /countSyncedEvents\(/);
+
+    // The legacy tasks.google_event_id column has no mode, so it may only
+    // stand in for a personal-mode count. In admin mode that column holds
+    // whichever user wrote last and says nothing about this calendar.
+    const fallback = fn.slice(fn.indexOf("countError"));
+    assert.match(fallback, /if \(syncMode === "personal"\)/);
+    assert.match(fallback, /\.neq\("google_event_id", null\)/);
+    // ...and the other mode must land on an explicit zero, not the legacy read.
+    assert.match(fallback, /else \{\s*syncedTaskCount = 0;\s*\}/);
+  });
+});
+
+describe("the month grid dates tasks in the calendar timezone", () => {
+  const view = () => strip(read("../components/calendar/calendar-view.tsx"));
+
+  test("toCalendarDate is what the grid keys on, not a sliced ISO string", () => {
+    const src = view();
+    const start = src.indexOf("function MonthCalendar");
+    const fn = src.slice(start, src.indexOf("\n}\n", src.lastIndexOf("return")));
+
+    assert.match(fn, /toCalendarDate\(new Date\(task\.deadline\)\)/);
+    assert.match(fn, /toCalendarDate\(new Date\(\)\)/);
+    // The bug this replaces: a 7 Oct IST deadline is 6 Oct in UTC, so the
+    // chip rendered a day early and a "due today" task looked overdue.
+    assert.doesNotMatch(fn, /toISOString\(\)\.slice/);
+    assert.doesNotMatch(src, /toISOString\(\)\.slice/);
+  });
+
+  test("the demonstrated off-by-one the helper exists to prevent", () => {
+    // A deadline due at IST midnight on 7 October.
+    const deadline = new Date("2026-10-07T00:00:00+05:30");
+    assert.equal(toCalendarDate(deadline), "2026-10-07");
+    assert.equal(deadline.toISOString().slice(0, 10), "2026-10-06");
+  });
+
+  test("the grid reads the shared task query, not an orphaned cache key", () => {
+    const src = view();
+    // taskListOptions is invalidated by task mutations and realtime; a
+    // private key is served stale forever, which is how the old dot grid
+    // kept showing deleted tasks.
+    assert.match(src, /useQuery\(taskListOptions\)/);
+    assert.doesNotMatch(src, /queryKey: \["myTasks"\]/);
+  });
+
+  test("the grid is accessible and selects a day", () => {
+    const src = view();
+    assert.match(src, /role="grid"/);
+    assert.match(src, /role="gridcell"/);
+    assert.match(src, /aria-selected=/);
+    assert.match(src, /tabIndex=\{0\}/);
+    // Six whole weeks, so paging months does not change the grid's height.
+    assert.match(src, /Array\.from\(\{ length: 42 \}/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Server and browser must agree on "today"
+//
+// A client component is still server-rendered, so its first client render has
+// to reproduce the server's HTML exactly. `Date.getFullYear()`/`getMonth()`
+// read the HOST timezone: a UTC server and an IST browser resolve the same
+// instant to different months, which React reports as a hydration mismatch.
+// `toCalendarDate` pins the zone, so the two agree by construction.
+// ---------------------------------------------------------------------------
+
+describe("today resolves identically on the server and in the browser", () => {
+  /** Run a snippet under a chosen TZ and return its stdout. */
+  const inTz = (tz: string, snippet: string): string =>
+    execFileSync(process.execPath, ["--input-type=module", "-e", snippet], {
+      env: { ...process.env, TZ: tz },
+      encoding: "utf8",
+    }).trim();
+
+  const PROBE = (expr: string) =>
+    `const d = new Date("2026-09-30T19:00:00Z");` +
+    `import { toCalendarDate } from "${new URL("../lib/google/calendar.ts", import.meta.url).href}";` +
+    `console.log(${expr});`;
+
+  test("the pinned-zone helper agrees across host timezones", () => {
+    const utc = inTz("UTC", PROBE("toCalendarDate(d)"));
+    const ist = inTz("Asia/Kolkata", PROBE("toCalendarDate(d)"));
+    assert.equal(utc, ist);
+    // 2026-09-30T19:00Z is 2026-10-01 00:30 in India — already October there.
+    assert.equal(utc, "2026-10-01");
+  });
+
+  test("the local getters that caused the mismatch really do disagree", () => {
+    // Guards the premise: if these two ever agreed, the fix would be
+    // unfalsifiable and this file would be asserting nothing.
+    const utc = inTz("UTC", PROBE("String(d.getMonth())"));
+    const ist = inTz("Asia/Kolkata", PROBE("String(d.getMonth())"));
+    assert.notEqual(utc, ist, "expected local getMonth() to differ across hosts");
+    assert.equal(utc, "8"); //  September on a UTC host
+    assert.equal(ist, "9"); //  October on an IST host
+  });
+
+  test("the tasks month grid never reads a local timezone getter", () => {
+    const src = strip(read("../components/tasks/calendar-view.tsx"));
+    const start = src.indexOf("export function CalendarView");
+    const fn = src.slice(start, src.indexOf("\n}\n", start));
+
+    // The month it opens on must come from the pinned helper.
+    assert.match(fn, /toCalendarDate\(new Date\(\)\)/);
+    assert.match(fn, /today\.split\("-"\)/);
+    // Not from the host clock, which is what desynced SSR from hydration.
+    assert.doesNotMatch(fn, /getFullYear\(\)/);
+    assert.doesNotMatch(fn, /getMonth\(\)/);
+    // The duplicated +05:30 helper went away with it.
+    assert.doesNotMatch(src, /istDayKey/);
+  });
+
+  test("deadline chips bucket through the same pinned helper", () => {
+    const src = strip(read("../components/tasks/calendar-view.tsx"));
+    assert.match(src, /toCalendarDate\(new Date\(t\.deadline\)\)/);
   });
 });

@@ -16,7 +16,7 @@ import { usePushNotifications } from "@/lib/use-push";
  * empty. One line on the dashboard fixes the discovery problem without
  * nagging anyone who has already sorted it out.
  *
- * SHOWN WHENE NEITHER CHANNEL IS SET UP. One is enough to stop the
+ * SHOWN WHEN NEITHER CHANNEL IS SET UP. One is enough to stop the
  * banner: someone who enabled push but skipped Google Calendar is
  * already getting their deadlines surfaced, and someone who connected
  * Google is getting Google's own reminders. Demanding both would train
@@ -30,12 +30,11 @@ import { usePushNotifications } from "@/lib/use-push";
  *
  * The cooldown lives in localStorage, which is an EXTERNAL STORE — it
  * outlives this component and changes without React knowing. That is
- * what useSyncExternalStore is for. It also sidesteps the two purity
- * traps this code would otherwise hit: setState-in-effect (a cascading
- * render on every mount) and Date.now()-during-render (a value that
- * changes every render, so nothing can memoise). Reading it as a single
- * boolean snapshot means the timestamp is compared exactly once, in one
- * place, and the answer is stable between renders.
+ * what useSyncExternalStore is for. It also sidesteps the purity trap of
+ * computing a new comparison value on every render: we pin the "now"
+ * snapshot once at render time and reuse it for both the read and the
+ * dismiss write, so server, hydration, and client all agree on the
+ * reference point for the same render.
  */
 const DISMISS_KEY = (userId: string) => `taskora:setup-banner-dismissed:${userId}`;
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -61,13 +60,13 @@ const subscribeDismissal = (onStoreChange: () => void) => {
  * that case we report "dismissed", which is the conservative answer —
  * a broken storage API should not mean we nag on every single page load.
  */
-function readDismissed(userId: string): boolean {
+function readDismissed(userId: string, now: number): boolean {
   try {
     const raw = window.localStorage.getItem(DISMISS_KEY(userId));
     if (!raw) return false;
     const until = Number(raw);
     if (!Number.isFinite(until)) return false;
-    if (until <= Date.now()) {
+    if (until <= now) {
       // Expired. Clear it so the key does not linger forever.
       window.localStorage.removeItem(DISMISS_KEY(userId));
       return false;
@@ -89,11 +88,16 @@ function readDismissed(userId: string): boolean {
  */
 const readDismissedOnServer = () => true;
 
+const SERVER_NOW = typeof window === "undefined" ? 0 : Date.now();
+
 export function CalendarSetupBanner({ userId }: { userId: string }) {
   const { data: calendar } = useQuery(googleCalendarOptions);
   const { state: pushState } = usePushNotifications();
 
-  const getSnapshot = useCallback(() => readDismissed(userId), [userId]);
+  const getSnapshot = useCallback(
+    () => readDismissed(userId, SERVER_NOW),
+    [userId, SERVER_NOW]
+  );
   const dismissed = useSyncExternalStore(
     subscribeDismissal,
     getSnapshot,
@@ -110,11 +114,9 @@ export function CalendarSetupBanner({ userId }: { userId: string }) {
   if (dismissed) return null;
 
   function dismiss() {
+    const until = SERVER_NOW + COOLDOWN_MS;
     try {
-      window.localStorage.setItem(
-        DISMISS_KEY(userId),
-        String(Date.now() + COOLDOWN_MS)
-      );
+      window.localStorage.setItem(DISMISS_KEY(userId), String(until));
     } catch {
       // Storage refused the write. Emit anyway so the in-memory cooldown
       // still applies for this session via the same read path.
